@@ -2,12 +2,15 @@
 
 #include <inttypes.h>
 #include <errno.h>
+#include <ctype.h>
 #include <stdarg.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
 
+#include "checksum.hpp"
 #include "json_output.hpp"
+#include "policy_storage.hpp"
 #include "relay_manager.hpp"
 #include "esp_app_desc.h"
 #include "esp_chip_info.h"
@@ -20,6 +23,7 @@
 #include "esp_system.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "mbedtls/base64.h"
 #include "sdkconfig.h"
 
 namespace {
@@ -28,6 +32,9 @@ constexpr const char *kTag = "power4_console";
 constexpr const char *kPrompt = "power4> ";
 constexpr size_t kRelayStateJsonBaseBytes = 96;
 constexpr size_t kRelayStateJsonBytesPerRelay = 160;
+constexpr size_t kPolicyUploadMaxDecodedBytes = 8192;
+constexpr size_t kPolicyUploadMaxEncodedBytes = ((kPolicyUploadMaxDecodedBytes + 2) / 3) * 4;
+constexpr size_t kPolicyUploadLineBytes = 160;
 
 bool parse_u32(const char *text, uint32_t *value)
 {
@@ -296,6 +303,220 @@ int relay_command(int argc, char **argv)
     return 1;
 }
 
+void print_config_usage(void)
+{
+    printf("usage:\n");
+    printf("  config show [active]\n");
+    printf("  config show staged\n");
+    printf("  config upload staged <sha1-hex>\n");
+    printf("  config accept staged\n");
+}
+
+bool is_base64_char(char c)
+{
+    return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') ||
+           c == '+' || c == '/' || c == '=';
+}
+
+size_t strip_line_end(char *line)
+{
+    size_t length = strlen(line);
+    while (length > 0 && (line[length - 1] == '\n' || line[length - 1] == '\r')) {
+        line[--length] = '\0';
+    }
+    return length;
+}
+
+bool append_base64_line(char *encoded, size_t capacity, size_t *used, const char *line)
+{
+    const size_t line_length = strlen(line);
+    if (*used + line_length > capacity) {
+        return false;
+    }
+
+    memcpy(encoded + *used, line, line_length);
+    *used += line_length;
+    encoded[*used] = '\0';
+    return true;
+}
+
+int config_upload_staged(const uint8_t expected_sha1[kChecksumSha1Bytes])
+{
+    char *encoded = static_cast<char *>(malloc(kPolicyUploadMaxEncodedBytes + 1));
+    uint8_t *decoded = static_cast<uint8_t *>(malloc(kPolicyUploadMaxDecodedBytes + 1));
+    if (encoded == nullptr || decoded == nullptr) {
+        printf("config upload staged failed: out of memory\n");
+        free(encoded);
+        free(decoded);
+        return 1;
+    }
+
+    encoded[0] = '\0';
+    size_t encoded_length = 0;
+    char line[kPolicyUploadLineBytes] = {};
+
+    printf("paste base64 policy; blank or invalid line ends upload\n");
+    while (fgets(line, sizeof(line), stdin) != nullptr) {
+        const size_t line_length = strip_line_end(line);
+        if (line_length == 0) {
+            printf("upload input ended: blank line\n");
+            break;
+        }
+
+        bool valid = true;
+        for (size_t i = 0; i < line_length; ++i) {
+            if (!is_base64_char(line[i])) {
+                valid = false;
+                break;
+            }
+        }
+        if (!valid) {
+            printf("upload input ended: invalid line\n");
+            break;
+        }
+
+        printf("%s\n", line);
+        if (!append_base64_line(encoded,
+                                kPolicyUploadMaxEncodedBytes,
+                                &encoded_length,
+                                line)) {
+            printf("config upload staged failed: encoded input too large\n");
+            free(encoded);
+            free(decoded);
+            return 1;
+        }
+    }
+
+    size_t decoded_length = 0;
+    const int decode_result = mbedtls_base64_decode(decoded,
+                                                   kPolicyUploadMaxDecodedBytes,
+                                                   &decoded_length,
+                                                   reinterpret_cast<const unsigned char *>(encoded),
+                                                   encoded_length);
+    if (decode_result != 0) {
+        printf("config upload staged failed: invalid base64 (%d)\n", decode_result);
+        free(encoded);
+        free(decoded);
+        return 1;
+    }
+
+    decoded[decoded_length] = '\0';
+    uint8_t actual_sha1[kChecksumSha1Bytes] = {};
+    esp_err_t err = checksum_sha1(decoded, decoded_length, actual_sha1);
+    if (err != ESP_OK) {
+        printf("config upload staged failed: checksum calculation: %s\n", esp_err_to_name(err));
+        free(encoded);
+        free(decoded);
+        return 1;
+    }
+
+    char expected_hex[kChecksumSha1HexChars + 1] = {};
+    char actual_hex[kChecksumSha1HexChars + 1] = {};
+    checksum_bytes_to_hex(expected_sha1, kChecksumSha1Bytes, expected_hex, sizeof(expected_hex));
+    checksum_bytes_to_hex(actual_sha1, kChecksumSha1Bytes, actual_hex, sizeof(actual_hex));
+
+    if (memcmp(actual_sha1, expected_sha1, kChecksumSha1Bytes) != 0) {
+        printf("config upload staged failed: checksum mismatch expected=%s actual=%s\n",
+               expected_hex,
+               actual_hex);
+        free(encoded);
+        free(decoded);
+        return 1;
+    }
+
+    err = policy_storage_write_staged(decoded, decoded_length);
+    if (err != ESP_OK) {
+        printf("config upload staged failed: %s\n", esp_err_to_name(err));
+        free(encoded);
+        free(decoded);
+        return 1;
+    }
+
+    printf("uploaded staged configuration: %u bytes sha1=%s\n",
+           static_cast<unsigned>(decoded_length),
+           actual_hex);
+
+    free(encoded);
+    free(decoded);
+    return 0;
+}
+
+int print_policy_slot(PolicySlot slot)
+{
+    char *contents = nullptr;
+    size_t length = 0;
+    const esp_err_t err = policy_storage_read_alloc(slot, &contents, &length);
+    if (err != ESP_OK) {
+        printf("config show %s failed: %s\n",
+               policy_storage_slot_name(slot),
+               esp_err_to_name(err));
+        return 1;
+    }
+
+    printf("config %s: %u bytes\n",
+           policy_storage_slot_name(slot),
+           static_cast<unsigned>(length));
+    if (length > 0) {
+        fwrite(contents, 1, length, stdout);
+        if (contents[length - 1] != '\n') {
+            printf("\n");
+        }
+    }
+
+    free(contents);
+    return 0;
+}
+
+int config_command(int argc, char **argv)
+{
+    if (argc < 2 || strcmp(argv[1], "help") == 0) {
+        print_config_usage();
+        return argc < 2 ? 1 : 0;
+    }
+
+    if (strcmp(argv[1], "show") == 0) {
+        if (argc == 2 || (argc == 3 && strcmp(argv[2], "active") == 0)) {
+            return print_policy_slot(PolicySlot::Active);
+        }
+        if (argc == 3 && strcmp(argv[2], "staged") == 0) {
+            return print_policy_slot(PolicySlot::Staged);
+        }
+
+        print_config_usage();
+        return 1;
+    }
+
+    if (strcmp(argv[1], "upload") == 0) {
+        uint8_t expected_sha1[kChecksumSha1Bytes] = {};
+        if (argc != 4 || strcmp(argv[2], "staged") != 0 ||
+            !checksum_parse_sha1_hex(argv[3], expected_sha1)) {
+            print_config_usage();
+            return 1;
+        }
+
+        return config_upload_staged(expected_sha1);
+    }
+
+    if (strcmp(argv[1], "accept") == 0) {
+        if (argc != 3 || strcmp(argv[2], "staged") != 0) {
+            print_config_usage();
+            return 1;
+        }
+
+        const esp_err_t err = policy_storage_accept_staged();
+        if (err != ESP_OK) {
+            printf("config accept staged failed: %s\n", esp_err_to_name(err));
+            return 1;
+        }
+
+        printf("accepted staged configuration as active\n");
+        return 0;
+    }
+
+    print_config_usage();
+    return 1;
+}
+
 const char *task_state_name(eTaskState state)
 {
     switch (state) {
@@ -334,6 +555,30 @@ void print_heap_line(const char *name, uint32_t caps)
            static_cast<unsigned>(free_now),
            static_cast<unsigned>(min_free),
            static_cast<unsigned>(largest));
+}
+
+void print_nvs_stats(void)
+{
+    nvs_stats_t stats = {};
+    size_t partition_size = 0;
+    const esp_err_t size_err = policy_storage_get_partition_size(&partition_size);
+    const esp_err_t err = policy_storage_get_stats(&stats);
+    if (err != ESP_OK) {
+        printf("\nnvs: unavailable (%s)\n", esp_err_to_name(err));
+        return;
+    }
+
+    printf("\nnvs:\n");
+    if (size_err == ESP_OK) {
+        printf("partition_size=%u bytes\n", static_cast<unsigned>(partition_size));
+    } else {
+        printf("partition_size=unknown (%s)\n", esp_err_to_name(size_err));
+    }
+    printf("entries used=%u free=%u total=%u namespace=%u\n",
+           static_cast<unsigned>(stats.used_entries),
+           static_cast<unsigned>(stats.free_entries),
+           static_cast<unsigned>(stats.total_entries),
+           static_cast<unsigned>(stats.namespace_count));
 }
 
 void print_task_list(void)
@@ -431,6 +676,7 @@ int system_command(int argc, char **argv)
     print_heap_line("spiram", MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
 #endif
 
+    print_nvs_stats();
     print_task_list();
     return 0;
 }
@@ -459,6 +705,13 @@ void register_commands(void)
     relay.func = &relay_command;
 
     ESP_ERROR_CHECK(esp_console_cmd_register(&relay));
+
+    esp_console_cmd_t config = {};
+    config.command = "config";
+    config.help = "Inspect and accept policy configuration";
+    config.func = &config_command;
+
+    ESP_ERROR_CHECK(esp_console_cmd_register(&config));
 }
 
 esp_err_t create_repl(esp_console_repl_t **repl)

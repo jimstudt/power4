@@ -1,16 +1,10 @@
 #include "json_output.hpp"
 
-#include <inttypes.h>
 #include <stdio.h>
 #include <string.h>
 
+#include "checksum.hpp"
 #include "esp_err.h"
-#include "esp_rom_crc.h"
-
-uint32_t json_output_crc32(const char *json, size_t length)
-{
-    return ~esp_rom_crc32_le(~0U, reinterpret_cast<const uint8_t *>(json), length);
-}
 
 esp_err_t json_output_print(const char *json)
 {
@@ -19,7 +13,12 @@ esp_err_t json_output_print(const char *json)
     }
 
     const size_t length = strlen(json);
-    const uint32_t crc = json_output_crc32(json, length);
-    printf("P4J1 %u %08" PRIX32 " %s\n", static_cast<unsigned>(length), crc, json);
+    char sha1_hex[kChecksumSha1HexChars + 1] = {};
+    const esp_err_t err = checksum_sha1_hex(json, length, sha1_hex);
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    printf("P4J1 %u %s %s\n", static_cast<unsigned>(length), sha1_hex, json);
     return ESP_OK;
 }

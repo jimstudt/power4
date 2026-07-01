@@ -127,10 +127,41 @@ relay force-on 1
 relay clear-force 1
 ```
 
-JSON-producing commands print a framed line with the JSON length and CRC32:
+Configuration command examples:
 
 ```text
-P4J1 <json-length> <crc32-hex> <json>
+config show
+config show staged
+config upload staged <sha1-hex>
+config accept staged
+```
+
+`config upload staged` reads base64-encoded policy text from the console until a
+blank line or a line containing a non-base64 character. The checksum is SHA-1 of
+the decoded policy bytes, written as hexadecimal. The staged NVS key is updated
+only after the decoded bytes match the requested checksum.
+
+On a Raspberry Pi, one way to compute the checksum and prepare the upload is:
+
+```sh
+POLICY=policy.lua
+SHA1=$(sha1sum "$POLICY" | awk '{print $1}')
+printf 'config upload staged %s\n' "$SHA1"
+base64 "$POLICY"
+printf '\n'
+```
+
+Paste or send that output to the controller console. After upload:
+
+```text
+config show staged
+config accept staged
+```
+
+JSON-producing commands print a framed line with the JSON length and SHA-1:
+
+```text
+P4J1 <json-length> <sha1-hex> <json>
 ```
 
 ## Repository Status

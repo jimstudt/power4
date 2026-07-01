@@ -1,8 +1,10 @@
 idf_component_register(
     SRCS
+        "checksum.cpp"
         "console.cpp"
         "json_output.cpp"
         "main.cpp"
+        "policy_storage.cpp"
         "relay_manager.cpp"
     INCLUDE_DIRS
         "."
