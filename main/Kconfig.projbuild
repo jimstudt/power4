@@ -1,0 +1,27 @@
+menu "Power4"
+
+    config POWER4_RELAY_COUNT
+        int "Number of relay outputs"
+        default 6
+        range 1 32
+        help
+            Number of relay outputs managed by the relay manager task. The
+            Waveshare ESP32-S3-Relay-6CH has six relay outputs.
+
+    config POWER4_RELAY_GPIO_MAP
+        string "Relay GPIO map"
+        default "1,2,41,42,45,46"
+        help
+            Comma-separated GPIO numbers for relay channels, in relay order.
+            For the Waveshare ESP32-S3-Relay-6CH, CH1..CH6 are GPIO
+            1, 2, 41, 42, 45, and 46.
+
+    config POWER4_RELAY_ACTIVE_LEVEL
+        int "Relay active GPIO level"
+        default 1
+        range 0 1
+        help
+            GPIO level that energizes a relay. Use 1 for active-high relay
+            drivers and 0 for active-low relay drivers.
+
+endmenu

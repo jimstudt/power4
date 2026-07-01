@@ -1,0 +1,9 @@
+idf_component_register(
+    SRCS
+        "console.cpp"
+        "json_output.cpp"
+        "main.cpp"
+        "relay_manager.cpp"
+    INCLUDE_DIRS
+        "."
+)
