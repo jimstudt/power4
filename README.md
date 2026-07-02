@@ -209,6 +209,23 @@ Relay N characteristic UUID: 79C7D5F0-9A10-4A7D-8F2B-0F4A7E0C1000 + N
 Characteristic value: one byte, 0x00 for off or 0x01 for on.
 ```
 
+Config flag GATT interface:
+
+```text
+Service UUID: 79C7D5F0-9A10-4A7D-8F2B-0F4A7E0C2000
+
+List characteristic UUID:  79C7D5F0-9A10-4A7D-8F2B-0F4A7E0C2001
+Set characteristic UUID:   79C7D5F0-9A10-4A7D-8F2B-0F4A7E0C2002
+Unset characteristic UUID: 79C7D5F0-9A10-4A7D-8F2B-0F4A7E0C2003
+
+List value: zero or more UTF-8 flag names separated by '\n'.
+Set write value: one flag name to set.
+Unset write value: one flag name to unset.
+```
+
+BLE access is currently unauthenticated. Any nearby BLE client that can connect
+can read relay states, read config flags, and set or unset config flags.
+
 ## Repository Status
 
 This is an early project skeleton. BLE battery integration, policy safety

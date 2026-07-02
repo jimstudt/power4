@@ -2,6 +2,7 @@
 
 #include <string.h>
 
+#include "config_gatt.hpp"
 #include "esp_log.h"
 #include "relay_gatt.hpp"
 
@@ -161,6 +162,11 @@ esp_err_t ble_manager_start(void)
     }
 
     err = relay_gatt_register();
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    err = config_gatt_register();
     if (err != ESP_OK) {
         return err;
     }
