@@ -8,6 +8,8 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "battery_bank.hpp"
+#include "battery_store.hpp"
 #include "checksum.hpp"
 #include "config_flags.hpp"
 #include "json_output.hpp"
@@ -22,6 +24,7 @@
 #include "esp_idf_version.h"
 #include "esp_log.h"
 #include "esp_system.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "mbedtls/base64.h"
@@ -165,6 +168,195 @@ int status_command(int argc, char **argv)
     int result = print_compact_relay_states();
     result |= print_config_flags();
     return result;
+}
+
+void print_show_usage(void)
+{
+    printf("usage:\n");
+    printf("  show batteries\n");
+}
+
+int show_batteries_command(void)
+{
+    BatteryRecord records[CONFIG_POWER4_MAX_BATTERIES] = {};
+    size_t count = 0;
+    const esp_err_t err = battery_store_snapshot(records, CONFIG_POWER4_MAX_BATTERIES, &count);
+    if (err != ESP_OK) {
+        printf("show batteries failed: %s\n", esp_err_to_name(err));
+        return 1;
+    }
+
+    printf("batteries: %u/%u\n",
+           static_cast<unsigned>(count),
+           static_cast<unsigned>(battery_store_capacity()));
+    if (count == 0) {
+        printf("none observed\n");
+        return 0;
+    }
+
+    const int64_t now_us = esp_timer_get_time();
+    printf("%-31s %9s %9s %7s %10s\n", "name", "voltage", "current", "soc", "age_s");
+    for (size_t i = 0; i < count; ++i) {
+        uint32_t age_s = 0;
+        if (now_us >= records[i].last_seen_us) {
+            age_s = static_cast<uint32_t>((now_us - records[i].last_seen_us) / 1000000LL);
+        }
+
+        printf("%-31s %8.3fV %8.3fA %6.1f%% %10" PRIu32 "\n",
+               records[i].name,
+               static_cast<double>(records[i].voltage_v),
+               static_cast<double>(records[i].current_a),
+               static_cast<double>(records[i].soc_percent),
+               age_s);
+    }
+
+    return 0;
+}
+
+int show_command(int argc, char **argv)
+{
+    if (argc < 2 || strcmp(argv[1], "help") == 0) {
+        print_show_usage();
+        return argc < 2 ? 1 : 0;
+    }
+
+    if (strcmp(argv[1], "batteries") == 0) {
+        if (argc != 2) {
+            print_show_usage();
+            return 1;
+        }
+        return show_batteries_command();
+    }
+
+    print_show_usage();
+    return 1;
+}
+
+void print_bank_usage(void)
+{
+    printf("usage:\n");
+    printf("  bank create <name> <battery> [battery...]\n");
+    printf("  bank show\n");
+    printf("  bank remove <name>\n");
+}
+
+int bank_show_command(void)
+{
+    BatteryBankList *banks = static_cast<BatteryBankList *>(malloc(sizeof(BatteryBankList)));
+    if (banks == nullptr) {
+        printf("bank show failed: out of memory\n");
+        return 1;
+    }
+
+    const esp_err_t err = battery_bank_list(banks);
+    if (err != ESP_OK) {
+        printf("bank show failed: %s\n", esp_err_to_name(err));
+        free(banks);
+        return 1;
+    }
+
+    printf("banks: %u/%u\n",
+           static_cast<unsigned>(banks->count),
+           static_cast<unsigned>(kBatteryBankMaxBanks));
+    if (banks->count == 0) {
+        printf("none configured\n");
+        free(banks);
+        return 0;
+    }
+
+    for (size_t i = 0; i < banks->count; ++i) {
+        const BatteryBankDefinition &bank = banks->banks[i];
+        BatteryBankState state = {};
+        const esp_err_t state_err = battery_bank_get_state(bank.name, &state);
+
+        printf("%s:", bank.name);
+        for (size_t j = 0; j < bank.battery_count; ++j) {
+            printf(" %s", bank.batteries[j]);
+        }
+
+        if (state_err != ESP_OK) {
+            printf(" state=error:%s\n", esp_err_to_name(state_err));
+        } else if (!state.ready) {
+            printf(" state=not-ready\n");
+        } else {
+            printf(" voltage=%.3fV current=%.3fA soc=%.1f%%\n",
+                   static_cast<double>(state.voltage_v),
+                   static_cast<double>(state.current_a),
+                   static_cast<double>(state.soc_percent));
+        }
+    }
+
+    free(banks);
+    return 0;
+}
+
+int bank_command(int argc, char **argv)
+{
+    if (argc < 2 || strcmp(argv[1], "help") == 0) {
+        print_bank_usage();
+        return argc < 2 ? 1 : 0;
+    }
+
+    if (strcmp(argv[1], "create") == 0) {
+        if (argc < 4 || !battery_bank_valid_name(argv[2])) {
+            print_bank_usage();
+            return 1;
+        }
+
+        const size_t battery_count = static_cast<size_t>(argc - 3);
+        const char *battery_names[CONFIG_POWER4_MAX_BATTERIES] = {};
+        if (battery_count > CONFIG_POWER4_MAX_BATTERIES) {
+            print_bank_usage();
+            return 1;
+        }
+        for (size_t i = 0; i < battery_count; ++i) {
+            battery_names[i] = argv[i + 3];
+        }
+
+        const esp_err_t err = battery_bank_create(argv[2], battery_names, battery_count);
+        if (err != ESP_OK) {
+            printf("bank create failed: %s\n", esp_err_to_name(err));
+            return 1;
+        }
+
+        printf("bank %s:", argv[2]);
+        for (size_t i = 0; i < battery_count; ++i) {
+            printf(" %s", battery_names[i]);
+        }
+        printf("\n");
+        return 0;
+    }
+
+    if (strcmp(argv[1], "show") == 0) {
+        if (argc != 2) {
+            print_bank_usage();
+            return 1;
+        }
+        return bank_show_command();
+    }
+
+    if (strcmp(argv[1], "remove") == 0) {
+        if (argc != 3 || !battery_bank_valid_name(argv[2])) {
+            print_bank_usage();
+            return 1;
+        }
+
+        const esp_err_t err = battery_bank_remove(argv[2]);
+        if (err == ESP_ERR_NOT_FOUND) {
+            printf("bank remove %s failed: not found\n", argv[2]);
+            return 1;
+        }
+        if (err != ESP_OK) {
+            printf("bank remove %s failed: %s\n", argv[2], esp_err_to_name(err));
+            return 1;
+        }
+
+        printf("bank removed %s\n", argv[2]);
+        return 0;
+    }
+
+    print_bank_usage();
+    return 1;
 }
 
 void print_set_usage(const char *command)
@@ -789,6 +981,20 @@ void register_commands(void)
     system.func = &system_command;
 
     ESP_ERROR_CHECK(esp_console_cmd_register(&system));
+
+    esp_console_cmd_t show = {};
+    show.command = "show";
+    show.help = "Show observed controller state";
+    show.func = &show_command;
+
+    ESP_ERROR_CHECK(esp_console_cmd_register(&show));
+
+    esp_console_cmd_t bank = {};
+    bank.command = "bank";
+    bank.help = "Configure and inspect battery banks";
+    bank.func = &bank_command;
+
+    ESP_ERROR_CHECK(esp_console_cmd_register(&bank));
 
     esp_console_cmd_t relay = {};
     relay.command = "relay";

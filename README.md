@@ -100,6 +100,8 @@ Relay hardware configuration is board-specific:
 CONFIG_POWER4_RELAY_COUNT=6
 CONFIG_POWER4_RELAY_GPIO_MAP="1,2,41,42,45,46"
 CONFIG_POWER4_RELAY_ACTIVE_LEVEL=1
+CONFIG_POWER4_MAX_BATTERIES=16
+CONFIG_POWER4_MAX_BANKS=4
 ```
 
 `CONFIG_POWER4_RELAY_COUNT` is the number of relay outputs managed by the relay
@@ -121,6 +123,13 @@ relay 6 -> GPIO 46
 `CONFIG_POWER4_RELAY_ACTIVE_LEVEL` is the GPIO level that energizes a relay.
 Use `1` for active-high relay drivers and `0` for active-low relay drivers.
 
+`CONFIG_POWER4_MAX_BATTERIES` is the maximum number of named batteries kept in
+the in-memory observation table. If a new battery is observed when the table is
+full, the least recently seen battery is evicted.
+
+`CONFIG_POWER4_MAX_BANKS` is the maximum number of named battery banks stored in
+NVS.
+
 For another board, change the relay count, GPIO map, and active level in
 `sdkconfig.defaults`, then regenerate or edit `sdkconfig` and rebuild.
 
@@ -141,6 +150,8 @@ status
 system
 set
 unset
+show
+bank
 relay
 ```
 
@@ -166,6 +177,30 @@ status
 Set names are stored as boolean flags in the `config` NVS namespace. Names are
 limited to 1-15 characters: letters, digits, underscore, and hyphen.
 
+Battery observation examples:
+
+```text
+show batteries
+```
+
+Battery observations are kept in memory by name. Each record contains voltage,
+current, state of charge, and last update time. The BLE battery code will record
+observations as battery integrations are added.
+
+Battery bank examples:
+
+```text
+bank create house pack_a pack_b
+bank show
+bank remove house
+```
+
+Battery banks are stored persistently in the `config` NVS namespace. A bank has
+a name and one or more battery names. Bank state is computed from observed
+battery state: voltage is the sum of member voltages, current is the maximum
+member current, and state of charge is the minimum member state of charge. If
+any member battery has not been observed, the bank state is `not-ready`.
+
 Policy execution runs from the `policy_active` NVS key. The policy task creates
 a fresh Lua environment once per minute, loads the active policy, executes it,
 and tears the environment down. If there is no active policy, it runs a tiny
@@ -178,6 +213,9 @@ The policy Lua environment currently provides:
 relay_on(1)   -- keep relay 1 on for 300 seconds
 relay_off(1)  -- clear relay 1's policy timer
 config_is_set("generator_ok") -- true when set from the console
+
+ready, volts, amps, soc = battery_bank_state("house")
+names = battery_bank_names()
 ```
 
 Configuration command examples:

@@ -4,6 +4,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "battery_bank.hpp"
 #include "config_flags.hpp"
 #include "policy_storage.hpp"
 #include "relay_manager.hpp"
@@ -106,6 +107,53 @@ int lua_config_is_set(lua_State *state)
     return 1;
 }
 
+int lua_battery_bank_state(lua_State *state)
+{
+    const char *name = luaL_checkstring(state, 1);
+
+    BatteryBankState bank_state = {};
+    const esp_err_t err = battery_bank_get_state(name, &bank_state);
+    if (err != ESP_OK) {
+        return luaL_error(state, "battery_bank_state(%s) failed: %s", name, esp_err_to_name(err));
+    }
+
+    lua_pushboolean(state, bank_state.ready);
+    if (!bank_state.ready) {
+        lua_pushnil(state);
+        lua_pushnil(state);
+        lua_pushnil(state);
+        return 4;
+    }
+
+    lua_pushnumber(state, bank_state.voltage_v);
+    lua_pushnumber(state, bank_state.current_a);
+    lua_pushnumber(state, bank_state.soc_percent);
+    return 4;
+}
+
+int lua_battery_bank_names(lua_State *state)
+{
+    BatteryBankList *banks = static_cast<BatteryBankList *>(malloc(sizeof(BatteryBankList)));
+    if (banks == nullptr) {
+        return luaL_error(state, "battery_bank_names() failed: out of memory");
+    }
+
+    const esp_err_t err = battery_bank_list(banks);
+    if (err != ESP_OK) {
+        free(banks);
+        return luaL_error(state, "battery_bank_names() failed: %s", esp_err_to_name(err));
+    }
+
+    lua_createtable(state, static_cast<int>(banks->count), 0);
+    for (size_t i = 0; i < banks->count; ++i) {
+        lua_pushstring(state, banks->banks[i].name);
+        lua_rawseti(state, -2, static_cast<lua_Integer>(i + 1));
+    }
+
+    free(banks);
+    return 1;
+}
+
 void register_policy_lua_functions(lua_State *state)
 {
     lua_pushcfunction(state, lua_relay_on);
@@ -114,6 +162,10 @@ void register_policy_lua_functions(lua_State *state)
     lua_setglobal(state, "relay_off");
     lua_pushcfunction(state, lua_config_is_set);
     lua_setglobal(state, "config_is_set");
+    lua_pushcfunction(state, lua_battery_bank_state);
+    lua_setglobal(state, "battery_bank_state");
+    lua_pushcfunction(state, lua_battery_bank_names);
+    lua_setglobal(state, "battery_bank_names");
 }
 
 void open_policy_lua_libraries(lua_State *state)

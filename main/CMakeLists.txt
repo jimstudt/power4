@@ -1,6 +1,8 @@
 idf_component_register(
     SRCS
         "ble_manager.cpp"
+        "battery_bank.cpp"
+        "battery_store.cpp"
         "checksum.cpp"
         "config_gatt.cpp"
         "config_flags.cpp"

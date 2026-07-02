@@ -48,4 +48,22 @@ menu "Power4"
         help
             FreeRTOS priority for the policy task.
 
+    config POWER4_MAX_BATTERIES
+        int "Maximum tracked batteries"
+        default 16
+        range 1 64
+        help
+            Maximum number of named batteries kept in the in-memory battery
+            observation table. When a new battery is observed and the table is
+            full, the least recently seen battery is evicted.
+
+    config POWER4_MAX_BANKS
+        int "Maximum configured battery banks"
+        default 4
+        range 1 16
+        help
+            Maximum number of named battery banks stored in NVS. Keeping this
+            small bounds the persistent configuration blob and the temporary
+            memory needed to edit it.
+
 endmenu
