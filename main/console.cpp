@@ -9,6 +9,7 @@
 #include <string.h>
 
 #include "checksum.hpp"
+#include "config_flags.hpp"
 #include "json_output.hpp"
 #include "policy_storage.hpp"
 #include "relay_manager.hpp"
@@ -131,6 +132,29 @@ int print_compact_relay_states(void)
     return 0;
 }
 
+int print_config_flags(void)
+{
+    ConfigFlagList flags = {};
+    const esp_err_t err = config_flags_list(&flags);
+    if (err != ESP_OK) {
+        printf("set: error:%s\n", esp_err_to_name(err));
+        return 1;
+    }
+
+    printf("set:");
+    if (flags.count == 0) {
+        printf(" none");
+    }
+    for (size_t i = 0; i < flags.count; ++i) {
+        printf(" %s", flags.names[i]);
+    }
+    if (flags.truncated) {
+        printf(" ...");
+    }
+    printf("\n");
+    return flags.truncated ? 1 : 0;
+}
+
 int status_command(int argc, char **argv)
 {
     (void)argc;
@@ -138,7 +162,49 @@ int status_command(int argc, char **argv)
 
     printf("power4 console is running\n");
     printf("mode: startup\n");
-    return print_compact_relay_states();
+    int result = print_compact_relay_states();
+    result |= print_config_flags();
+    return result;
+}
+
+void print_set_usage(const char *command)
+{
+    printf("usage: %s <name>\n", command);
+    printf("name: 1-15 characters, letters/digits/_/-\n");
+}
+
+int set_command(int argc, char **argv)
+{
+    if (argc != 2 || !config_flags_valid_name(argv[1])) {
+        print_set_usage("set");
+        return 1;
+    }
+
+    const esp_err_t err = config_flags_set(argv[1]);
+    if (err != ESP_OK) {
+        printf("set %s failed: %s\n", argv[1], esp_err_to_name(err));
+        return 1;
+    }
+
+    printf("set %s\n", argv[1]);
+    return 0;
+}
+
+int unset_command(int argc, char **argv)
+{
+    if (argc != 2 || !config_flags_valid_name(argv[1])) {
+        print_set_usage("unset");
+        return 1;
+    }
+
+    const esp_err_t err = config_flags_unset(argv[1]);
+    if (err != ESP_OK) {
+        printf("unset %s failed: %s\n", argv[1], esp_err_to_name(err));
+        return 1;
+    }
+
+    printf("unset %s\n", argv[1]);
+    return 0;
 }
 
 bool append_json(char *buffer, size_t capacity, size_t *used, const char *format, ...)
@@ -691,6 +757,20 @@ void register_commands(void)
     status.func = &status_command;
 
     ESP_ERROR_CHECK(esp_console_cmd_register(&status));
+
+    esp_console_cmd_t set = {};
+    set.command = "set";
+    set.help = "Set a named boolean config flag";
+    set.func = &set_command;
+
+    ESP_ERROR_CHECK(esp_console_cmd_register(&set));
+
+    esp_console_cmd_t unset = {};
+    unset.command = "unset";
+    unset.help = "Clear a named boolean config flag";
+    unset.func = &unset_command;
+
+    ESP_ERROR_CHECK(esp_console_cmd_register(&unset));
 
     esp_console_cmd_t system = {};
     system.command = "system";

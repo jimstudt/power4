@@ -1,6 +1,7 @@
 idf_component_register(
     SRCS
         "checksum.cpp"
+        "config_flags.cpp"
         "console.cpp"
         "json_output.cpp"
         "main.cpp"

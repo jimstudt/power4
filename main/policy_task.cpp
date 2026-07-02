@@ -4,6 +4,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "config_flags.hpp"
 #include "policy_storage.hpp"
 #include "relay_manager.hpp"
 #include "esp_err.h"
@@ -91,12 +92,28 @@ int lua_relay_off(lua_State *state)
     return 0;
 }
 
+int lua_config_is_set(lua_State *state)
+{
+    const char *name = luaL_checkstring(state, 1);
+
+    bool is_set = false;
+    const esp_err_t err = config_flags_is_set(name, &is_set);
+    if (err != ESP_OK) {
+        return luaL_error(state, "config_is_set(%s) failed: %s", name, esp_err_to_name(err));
+    }
+
+    lua_pushboolean(state, is_set);
+    return 1;
+}
+
 void register_policy_lua_functions(lua_State *state)
 {
     lua_pushcfunction(state, lua_relay_on);
     lua_setglobal(state, "relay_on");
     lua_pushcfunction(state, lua_relay_off);
     lua_setglobal(state, "relay_off");
+    lua_pushcfunction(state, lua_config_is_set);
+    lua_setglobal(state, "config_is_set");
 }
 
 void open_policy_lua_libraries(lua_State *state)

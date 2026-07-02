@@ -113,6 +113,8 @@ Available starter commands:
 help
 status
 system
+set
+unset
 relay
 ```
 
@@ -127,6 +129,17 @@ relay force-on 1
 relay clear-force 1
 ```
 
+Mode/config flag examples:
+
+```text
+set generator_ok
+unset generator_ok
+status
+```
+
+Set names are stored as boolean flags in the `config` NVS namespace. Names are
+limited to 1-15 characters: letters, digits, underscore, and hyphen.
+
 Policy execution runs from the `policy_active` NVS key. The policy task creates
 a fresh Lua environment once per minute, loads the active policy, executes it,
 and tears the environment down. If there is no active policy, it runs a tiny
@@ -138,6 +151,7 @@ The policy Lua environment currently provides:
 ```lua
 relay_on(1)   -- keep relay 1 on for 300 seconds
 relay_off(1)  -- clear relay 1's policy timer
+config_is_set("generator_ok") -- true when set from the console
 ```
 
 Configuration command examples:
