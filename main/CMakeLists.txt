@@ -4,8 +4,25 @@ idf_component_register(
         "console.cpp"
         "json_output.cpp"
         "main.cpp"
+        "policy_task.cpp"
         "policy_storage.cpp"
         "relay_manager.cpp"
     INCLUDE_DIRS
         "."
+    REQUIRES
+        console
+        esp_app_format
+        esp_driver_gpio
+        esp_driver_usb_serial_jtag
+        esp_hw_support
+        esp_partition
+        esp_system
+        esp_timer
+        freertos
+        heap
+        log
+        lua
+        mbedtls
+        nvs_flash
+        spi_flash
 )

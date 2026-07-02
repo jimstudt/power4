@@ -24,4 +24,28 @@ menu "Power4"
             GPIO level that energizes a relay. Use 1 for active-high relay
             drivers and 0 for active-low relay drivers.
 
+    config POWER4_POLICY_PERIOD_SECONDS
+        int "Policy evaluation period, seconds"
+        default 60
+        range 1 3600
+        help
+            Period between policy evaluations. The operational default is one
+            minute.
+
+    config POWER4_POLICY_TASK_STACK_BYTES
+        int "Policy task stack size, bytes"
+        default 16384
+        range 4096 65536
+        help
+            Stack allocated for the policy task. Lua creates and tears down an
+            interpreter each cycle, so this is intentionally larger than the
+            simple relay and console support tasks.
+
+    config POWER4_POLICY_TASK_PRIORITY
+        int "Policy task priority"
+        default 4
+        range 1 24
+        help
+            FreeRTOS priority for the policy task.
+
 endmenu

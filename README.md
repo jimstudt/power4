@@ -127,6 +127,19 @@ relay force-on 1
 relay clear-force 1
 ```
 
+Policy execution runs from the `policy_active` NVS key. The policy task creates
+a fresh Lua environment once per minute, loads the active policy, executes it,
+and tears the environment down. If there is no active policy, it runs a tiny
+default Lua script that prints a "no active configuration" message so the Lua
+path is still exercised.
+
+The policy Lua environment currently provides:
+
+```lua
+relay_on(1)   -- keep relay 1 on for 300 seconds
+relay_off(1)  -- clear relay 1's policy timer
+```
+
 Configuration command examples:
 
 ```text
@@ -166,6 +179,6 @@ P4J1 <json-length> <sha1-hex> <json>
 
 ## Repository Status
 
-This is an early project skeleton. Configuration transfer, BLE battery
-integration, policy execution, and safety behavior still need to be designed and
+This is an early project skeleton. BLE battery integration, policy safety
+behavior, and the actual site policy APIs still need to be designed and
 implemented.

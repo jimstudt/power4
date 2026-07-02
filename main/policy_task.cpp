@@ -1,0 +1,210 @@
+#include "policy_task.hpp"
+
+#include <stdint.h>
+#include <stdlib.h>
+#include <string.h>
+
+#include "policy_storage.hpp"
+#include "relay_manager.hpp"
+#include "esp_err.h"
+#include "esp_log.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "sdkconfig.h"
+
+extern "C" {
+#define LUA_32BITS 1
+#include "lauxlib.h"
+#include "lua.h"
+#include "lualib.h"
+}
+
+namespace {
+
+constexpr const char *kTag = "policy_task";
+constexpr const char *kTaskName = "policy";
+constexpr TickType_t kPolicyPeriodTicks = pdMS_TO_TICKS(CONFIG_POWER4_POLICY_PERIOD_SECONDS * 1000);
+constexpr int kLuaHookInstructionCount = 1000;
+constexpr uint32_t kRelayPolicyHoldSeconds = 300;
+constexpr const char *kEmptyPolicySource =
+    "print(\"power4 policy: no active configuration\")\n";
+
+struct LuaRunContext {
+    TickType_t deadline;
+};
+
+TaskHandle_t g_policy_task = nullptr;
+
+bool tick_reached(TickType_t deadline)
+{
+    return static_cast<int32_t>(xTaskGetTickCount() - deadline) >= 0;
+}
+
+void policy_lua_hook(lua_State *state, lua_Debug *debug)
+{
+    (void)debug;
+
+    LuaRunContext *context = *static_cast<LuaRunContext **>(lua_getextraspace(state));
+    if (context != nullptr && tick_reached(context->deadline)) {
+        luaL_error(state, "policy execution timed out");
+    }
+}
+
+void log_lua_error(lua_State *state, const char *phase)
+{
+    const char *message = lua_tostring(state, -1);
+    if (message == nullptr) {
+        message = "unknown Lua error";
+    }
+    ESP_LOGW(kTag, "policy %s failed: %s", phase, message);
+}
+
+uint8_t lua_check_relay(lua_State *state, int arg)
+{
+    const lua_Integer relay = luaL_checkinteger(state, arg);
+    if (relay < 1 || relay > relay_manager_count()) {
+        luaL_argerror(state, arg, "relay number out of range");
+    }
+
+    return static_cast<uint8_t>(relay);
+}
+
+int lua_relay_on(lua_State *state)
+{
+    const uint8_t relay = lua_check_relay(state, 1);
+    const esp_err_t err = relay_manager_on_for(relay, kRelayPolicyHoldSeconds);
+    if (err != ESP_OK) {
+        return luaL_error(state, "relay_on(%u) failed: %s", relay, esp_err_to_name(err));
+    }
+
+    return 0;
+}
+
+int lua_relay_off(lua_State *state)
+{
+    const uint8_t relay = lua_check_relay(state, 1);
+    const esp_err_t err = relay_manager_on_for(relay, 0);
+    if (err != ESP_OK) {
+        return luaL_error(state, "relay_off(%u) failed: %s", relay, esp_err_to_name(err));
+    }
+
+    return 0;
+}
+
+void register_policy_lua_functions(lua_State *state)
+{
+    lua_pushcfunction(state, lua_relay_on);
+    lua_setglobal(state, "relay_on");
+    lua_pushcfunction(state, lua_relay_off);
+    lua_setglobal(state, "relay_off");
+}
+
+void open_policy_lua_libraries(lua_State *state)
+{
+    luaL_requiref(state, LUA_GNAME, luaopen_base, 1);
+    lua_pop(state, 1);
+    luaL_requiref(state, LUA_TABLIBNAME, luaopen_table, 1);
+    lua_pop(state, 1);
+    luaL_requiref(state, LUA_STRLIBNAME, luaopen_string, 1);
+    lua_pop(state, 1);
+    luaL_requiref(state, LUA_MATHLIBNAME, luaopen_math, 1);
+    lua_pop(state, 1);
+}
+
+bool run_lua_policy(const char *source, size_t length, const char *chunk_name, TickType_t deadline)
+{
+    lua_State *state = luaL_newstate();
+    if (state == nullptr) {
+        ESP_LOGE(kTag, "failed to create Lua state");
+        return false;
+    }
+
+    LuaRunContext context = {
+        .deadline = deadline,
+    };
+    *static_cast<LuaRunContext **>(lua_getextraspace(state)) = &context;
+
+    open_policy_lua_libraries(state);
+    register_policy_lua_functions(state);
+    lua_sethook(state, policy_lua_hook, LUA_MASKCOUNT, kLuaHookInstructionCount);
+
+    bool ok = false;
+    if (luaL_loadbuffer(state, source, length, chunk_name) != LUA_OK) {
+        log_lua_error(state, "load");
+    } else if (lua_pcall(state, 0, 0, 0) != LUA_OK) {
+        log_lua_error(state, "run");
+    } else {
+        ok = true;
+    }
+
+    lua_close(state);
+    return ok;
+}
+
+void run_policy_cycle(TickType_t deadline)
+{
+    char *active_source = nullptr;
+    size_t active_length = 0;
+    esp_err_t err = policy_storage_read_alloc(PolicySlot::Active, &active_source, &active_length);
+    if (err != ESP_OK) {
+        ESP_LOGW(kTag, "failed to read active policy: %s", esp_err_to_name(err));
+        return;
+    }
+
+    const bool has_active_policy = active_length > 0;
+    const char *source = has_active_policy ? active_source : kEmptyPolicySource;
+    const size_t length = has_active_policy ? active_length : strlen(kEmptyPolicySource);
+    const char *chunk_name = has_active_policy ? "policy_active" : "policy_empty";
+
+    ESP_LOGI(kTag,
+             "running %s policy (%u bytes)",
+             has_active_policy ? "active" : "empty",
+             static_cast<unsigned>(length));
+    if (!run_lua_policy(source, length, chunk_name, deadline)) {
+        ESP_LOGW(kTag, "policy cycle did not complete successfully");
+    }
+
+    free(active_source);
+}
+
+void policy_task_main(void *arg)
+{
+    (void)arg;
+
+    while (true) {
+        const TickType_t cycle_start = xTaskGetTickCount();
+        const TickType_t deadline = cycle_start + kPolicyPeriodTicks;
+
+        run_policy_cycle(deadline);
+
+        const TickType_t now = xTaskGetTickCount();
+        const TickType_t next_cycle = cycle_start + kPolicyPeriodTicks;
+        if (!tick_reached(next_cycle)) {
+            vTaskDelay(next_cycle - now);
+        } else {
+            taskYIELD();
+        }
+    }
+}
+
+}  // namespace
+
+esp_err_t policy_task_start(void)
+{
+    if (g_policy_task != nullptr) {
+        return ESP_OK;
+    }
+
+    BaseType_t created = xTaskCreate(policy_task_main,
+                                     kTaskName,
+                                     CONFIG_POWER4_POLICY_TASK_STACK_BYTES,
+                                     nullptr,
+                                     CONFIG_POWER4_POLICY_TASK_PRIORITY,
+                                     &g_policy_task);
+    if (created != pdPASS) {
+        g_policy_task = nullptr;
+        return ESP_ERR_NO_MEM;
+    }
+
+    return ESP_OK;
+}
