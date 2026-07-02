@@ -191,6 +191,11 @@ JSON-producing commands print a framed line with the JSON length and SHA-1:
 P4J1 <json-length> <sha1-hex> <json>
 ```
 
+BLE support is initialized with ESP-IDF NimBLE at startup. No BMS client,
+DC/DC client, or relay-state GATT service is exposed yet; this step only brings
+up the stack so memory and image-size cost can be measured before adding
+protocol behavior.
+
 ## Repository Status
 
 This is an early project skeleton. BLE battery integration, policy safety
