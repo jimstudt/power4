@@ -138,7 +138,7 @@ esp_err_t config_flags_list(ConfigFlagList *list)
     *list = ConfigFlagList {};
 
     nvs_iterator_t iterator = nullptr;
-    esp_err_t err = nvs_entry_find(nullptr, kNamespace, NVS_TYPE_U8, &iterator);
+    esp_err_t err = nvs_entry_find(NVS_DEFAULT_PART_NAME, kNamespace, NVS_TYPE_U8, &iterator);
     if (err == ESP_ERR_NVS_NOT_FOUND) {
         return ESP_OK;
     }

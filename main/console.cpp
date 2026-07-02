@@ -197,13 +197,24 @@ int unset_command(int argc, char **argv)
         return 1;
     }
 
-    const esp_err_t err = config_flags_unset(argv[1]);
+    bool was_set = false;
+    esp_err_t err = config_flags_is_set(argv[1], &was_set);
     if (err != ESP_OK) {
         printf("unset %s failed: %s\n", argv[1], esp_err_to_name(err));
         return 1;
     }
 
-    printf("unset %s\n", argv[1]);
+    err = config_flags_unset(argv[1]);
+    if (err != ESP_OK) {
+        printf("unset %s failed: %s\n", argv[1], esp_err_to_name(err));
+        return 1;
+    }
+
+    if (was_set) {
+        printf("unset %s\n", argv[1]);
+    } else {
+        printf("unset %s (was not set)\n", argv[1]);
+    }
     return 0;
 }
 
