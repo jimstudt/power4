@@ -34,6 +34,7 @@ Common targets:
 
 ```sh
 make build
+make package
 make flash
 make monitor
 make menuconfig
@@ -60,6 +61,31 @@ The default serial port is `/dev/tty.usbmodem1101` and can be overridden with
 
 ```sh
 make PORT=/dev/tty.usbmodem1101 flash monitor
+```
+
+To build a firmware bundle for installation from a Raspberry Pi or another
+machine without ESP-IDF, run:
+
+```sh
+make package
+```
+
+This writes `dist/power4-firmware/` and `dist/power4-firmware.tar.gz`. The
+bundle contains the bootloader, partition table, app binary, ESP-IDF flash
+arguments, and small `flash.sh` and `monitor.sh` scripts.
+
+The Raspberry Pi does not need a full ESP-IDF install to flash or monitor a
+prebuilt bundle. A minimal setup is:
+
+```sh
+sudo apt install esptool picocom
+```
+
+After unpacking the bundle on the Pi:
+
+```sh
+PORT=/dev/ttyACM0 ./flash.sh
+PORT=/dev/ttyACM0 ./monitor.sh
 ```
 
 ## Configuration
