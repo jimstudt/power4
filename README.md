@@ -191,10 +191,23 @@ JSON-producing commands print a framed line with the JSON length and SHA-1:
 P4J1 <json-length> <sha1-hex> <json>
 ```
 
-BLE support is initialized with ESP-IDF NimBLE at startup. No BMS client,
-DC/DC client, or relay-state GATT service is exposed yet; this step only brings
-up the stack so memory and image-size cost can be measured before adding
-protocol behavior.
+BLE support is initialized with ESP-IDF NimBLE at startup. The controller
+advertises as `power4` and exposes a read-only custom relay binary sensor
+service. Each relay has one readable characteristic whose value is a single byte:
+`0` means off and `1` means on. Timer and administrative override details remain
+console-only internal state.
+
+Relay binary sensor GATT interface:
+
+```text
+Service UUID: 79C7D5F0-9A10-4A7D-8F2B-0F4A7E0C1000
+
+Relay 1 characteristic UUID: 79C7D5F0-9A10-4A7D-8F2B-0F4A7E0C1001
+Relay 2 characteristic UUID: 79C7D5F0-9A10-4A7D-8F2B-0F4A7E0C1002
+Relay N characteristic UUID: 79C7D5F0-9A10-4A7D-8F2B-0F4A7E0C1000 + N
+
+Characteristic value: one byte, 0x00 for off or 0x01 for on.
+```
 
 ## Repository Status
 

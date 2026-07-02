@@ -8,6 +8,7 @@ idf_component_register(
         "main.cpp"
         "policy_task.cpp"
         "policy_storage.cpp"
+        "relay_gatt.cpp"
         "relay_manager.cpp"
     INCLUDE_DIRS
         "."
