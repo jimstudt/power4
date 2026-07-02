@@ -257,3 +257,7 @@ can read relay states, read config flags, and set or unset config flags.
 This is an early project skeleton. BLE battery integration, policy safety
 behavior, and the actual site policy APIs still need to be designed and
 implemented.
+
+## License
+
+This project is licensed under the MIT License. See `LICENSE`.
