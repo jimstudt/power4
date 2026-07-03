@@ -5,6 +5,8 @@
 #include "config_gatt.hpp"
 #include "esp_log.h"
 #include "relay_gatt.hpp"
+#include "freertos/FreeRTOS.h"
+#include "freertos/event_groups.h"
 
 extern "C" {
 #include "host/ble_gap.h"
@@ -23,7 +25,11 @@ constexpr const char *kTag = "ble_manager";
 constexpr const char *kDeviceName = "power4";
 
 bool g_ble_started = false;
+bool g_ble_synced = false;
 uint8_t g_own_addr_type = 0;
+EventGroupHandle_t g_ble_events = nullptr;
+
+constexpr EventBits_t kBleSyncedBit = BIT0;
 
 void ble_advertise(void);
 
@@ -107,6 +113,10 @@ void ble_advertise(void)
 
 void ble_on_reset(int reason)
 {
+    g_ble_synced = false;
+    if (g_ble_events != nullptr) {
+        xEventGroupClearBits(g_ble_events, kBleSyncedBit);
+    }
     ESP_LOGW(kTag, "NimBLE host reset: reason=%d", reason);
 }
 
@@ -125,6 +135,10 @@ void ble_on_sync(void)
     }
 
     ESP_LOGI(kTag, "NimBLE host synchronized");
+    g_ble_synced = true;
+    if (g_ble_events != nullptr) {
+        xEventGroupSetBits(g_ble_events, kBleSyncedBit);
+    }
     ble_advertise();
 }
 
@@ -144,6 +158,11 @@ esp_err_t ble_manager_start(void)
 {
     if (g_ble_started) {
         return ESP_OK;
+    }
+
+    g_ble_events = xEventGroupCreate();
+    if (g_ble_events == nullptr) {
+        return ESP_ERR_NO_MEM;
     }
 
     esp_err_t err = nimble_port_init();
@@ -177,5 +196,39 @@ esp_err_t ble_manager_start(void)
     nimble_port_freertos_init(ble_host_task);
     g_ble_started = true;
     ESP_LOGI(kTag, "NimBLE started");
+    return ESP_OK;
+}
+
+bool ble_manager_is_synced(void)
+{
+    return g_ble_synced;
+}
+
+esp_err_t ble_manager_wait_until_synced(TickType_t timeout)
+{
+    if (g_ble_events == nullptr) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    const EventBits_t bits = xEventGroupWaitBits(g_ble_events,
+                                                 kBleSyncedBit,
+                                                 pdFALSE,
+                                                 pdTRUE,
+                                                 timeout);
+    return (bits & kBleSyncedBit) != 0 ? ESP_OK : ESP_ERR_TIMEOUT;
+}
+
+uint8_t ble_manager_own_addr_type(void)
+{
+    return g_own_addr_type;
+}
+
+esp_err_t ble_manager_restart_advertising(void)
+{
+    if (!g_ble_synced) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    ble_advertise();
     return ESP_OK;
 }

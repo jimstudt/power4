@@ -2,6 +2,7 @@ idf_component_register(
     SRCS
         "ble_manager.cpp"
         "battery_bank.cpp"
+        "battery_scanner.cpp"
         "battery_store.cpp"
         "checksum.cpp"
         "config_gatt.cpp"
@@ -13,6 +14,7 @@ idf_component_register(
         "policy_storage.cpp"
         "relay_gatt.cpp"
         "relay_manager.cpp"
+        "utils.cpp"
     INCLUDE_DIRS
         "."
     REQUIRES

@@ -9,6 +9,7 @@
 #include <string.h>
 
 #include "battery_bank.hpp"
+#include "battery_scanner.hpp"
 #include "battery_store.hpp"
 #include "checksum.hpp"
 #include "config_flags.hpp"
@@ -195,19 +196,39 @@ int show_batteries_command(void)
     }
 
     const int64_t now_us = esp_timer_get_time();
-    printf("%-31s %9s %9s %7s %10s\n", "name", "voltage", "current", "soc", "age_s");
+    printf("%-31s %9s %9s %7s %7s %6s %10s\n",
+           "name",
+           "voltage",
+           "current",
+           "soc",
+           "temp",
+           "cycles",
+           "age_s");
     for (size_t i = 0; i < count; ++i) {
         uint32_t age_s = 0;
         if (now_us >= records[i].last_seen_us) {
             age_s = static_cast<uint32_t>((now_us - records[i].last_seen_us) / 1000000LL);
         }
 
-        printf("%-31s %8.3fV %8.3fA %6.1f%% %10" PRIu32 "\n",
-               records[i].name,
-               static_cast<double>(records[i].voltage_v),
-               static_cast<double>(records[i].current_a),
-               static_cast<double>(records[i].soc_percent),
-               age_s);
+        if (records[i].temperature_valid) {
+            printf("%-31s %8.3fV %8.3fA %6.1f%% %6.1fC %6u %10" PRIu32 "\n",
+                   records[i].name,
+                   static_cast<double>(records[i].voltage_v),
+                   static_cast<double>(records[i].current_a),
+                   static_cast<double>(records[i].soc_percent),
+                   static_cast<double>(records[i].temperature_c),
+                   records[i].cycle_count,
+                   age_s);
+        } else {
+            printf("%-31s %8.3fV %8.3fA %6.1f%% %7s %6u %10" PRIu32 "\n",
+                   records[i].name,
+                   static_cast<double>(records[i].voltage_v),
+                   static_cast<double>(records[i].current_a),
+                   static_cast<double>(records[i].soc_percent),
+                   "-",
+                   records[i].cycle_count,
+                   age_s);
+        }
     }
 
     return 0;
@@ -786,6 +807,38 @@ int config_command(int argc, char **argv)
     return 1;
 }
 
+void print_debug_usage(void)
+{
+    printf("usage:\n");
+    printf("  debug ble_scanner on\n");
+    printf("  debug ble_scanner off\n");
+}
+
+int debug_command(int argc, char **argv)
+{
+    if (argc < 2 || strcmp(argv[1], "help") == 0) {
+        print_debug_usage();
+        return argc < 2 ? 1 : 0;
+    }
+
+    if (strcmp(argv[1], "ble_scanner") != 0 || argc != 3) {
+        print_debug_usage();
+        return 1;
+    }
+
+    if (strcmp(argv[2], "on") == 0) {
+        battery_scanner_set_verbose(true);
+    } else if (strcmp(argv[2], "off") == 0) {
+        battery_scanner_set_verbose(false);
+    } else {
+        print_debug_usage();
+        return 1;
+    }
+
+    printf("debug ble_scanner %s\n", battery_scanner_verbose_enabled() ? "on" : "off");
+    return 0;
+}
+
 const char *task_state_name(eTaskState state)
 {
     switch (state) {
@@ -1009,6 +1062,13 @@ void register_commands(void)
     config.func = &config_command;
 
     ESP_ERROR_CHECK(esp_console_cmd_register(&config));
+
+    esp_console_cmd_t debug = {};
+    debug.command = "debug";
+    debug.help = "Control runtime debug logging";
+    debug.func = &debug_command;
+
+    ESP_ERROR_CHECK(esp_console_cmd_register(&debug));
 }
 
 esp_err_t create_repl(esp_console_repl_t **repl)

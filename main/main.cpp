@@ -1,5 +1,6 @@
 #include "ble_manager.hpp"
 #include "battery_bank.hpp"
+#include "battery_scanner.hpp"
 #include "battery_store.hpp"
 #include "console.hpp"
 #include "policy_task.hpp"
@@ -25,6 +26,7 @@ extern "C" void app_main(void)
     ESP_ERROR_CHECK(battery_bank_init());
     ESP_ERROR_CHECK(relay_manager_start());
     ESP_ERROR_CHECK(ble_manager_start());
+    ESP_ERROR_CHECK(battery_scanner_start());
     ESP_ERROR_CHECK(policy_task_start());
     ESP_ERROR_CHECK(power4_console_start());
 

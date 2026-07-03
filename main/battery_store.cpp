@@ -7,6 +7,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "sdkconfig.h"
+#include "utils.hpp"
 
 namespace {
 
@@ -20,36 +21,11 @@ struct BatterySlot {
 BatterySlot g_batteries[CONFIG_POWER4_MAX_BATTERIES] = {};
 SemaphoreHandle_t g_mutex = nullptr;
 
-class StoreLock {
-public:
-    StoreLock(void)
-    {
-        if (g_mutex != nullptr) {
-            locked_ = xSemaphoreTake(g_mutex, portMAX_DELAY) == pdTRUE;
-        }
-    }
-
-    ~StoreLock(void)
-    {
-        if (locked_) {
-            xSemaphoreGive(g_mutex);
-        }
-    }
-
-    bool locked(void) const
-    {
-        return locked_;
-    }
-
-private:
-    bool locked_ = false;
-};
-
 int find_by_name(const char *name)
 {
-    for (size_t i = 0; i < CONFIG_POWER4_MAX_BATTERIES; ++i) {
+    for (int i = 0; i < CONFIG_POWER4_MAX_BATTERIES; ++i) {
         if (g_batteries[i].occupied && strcmp(g_batteries[i].record.name, name) == 0) {
-            return static_cast<int>(i);
+            return i;
         }
     }
 
@@ -58,9 +34,9 @@ int find_by_name(const char *name)
 
 int find_empty(void)
 {
-    for (size_t i = 0; i < CONFIG_POWER4_MAX_BATTERIES; ++i) {
+    for (int i = 0; i < CONFIG_POWER4_MAX_BATTERIES; ++i) {
         if (!g_batteries[i].occupied) {
-            return static_cast<int>(i);
+            return i;
         }
     }
 
@@ -69,14 +45,14 @@ int find_empty(void)
 
 int find_least_recently_seen(void)
 {
-    size_t oldest = 0;
-    for (size_t i = 1; i < CONFIG_POWER4_MAX_BATTERIES; ++i) {
+    int oldest = 0;
+    for (int i = 1; i < CONFIG_POWER4_MAX_BATTERIES; ++i) {
         if (g_batteries[i].record.last_seen_us < g_batteries[oldest].record.last_seen_us) {
             oldest = i;
         }
     }
 
-    return static_cast<int>(oldest);
+    return oldest;
 }
 
 void write_record(BatterySlot *slot,
@@ -84,12 +60,18 @@ void write_record(BatterySlot *slot,
                   float voltage_v,
                   float current_a,
                   float soc_percent,
+                  uint16_t cycle_count,
+                  bool temperature_valid,
+                  float temperature_c,
                   int64_t now_us)
 {
     strlcpy(slot->record.name, name, sizeof(slot->record.name));
     slot->record.voltage_v = voltage_v;
     slot->record.current_a = current_a;
     slot->record.soc_percent = soc_percent;
+    slot->record.cycle_count = cycle_count;
+    slot->record.temperature_valid = temperature_valid;
+    slot->record.temperature_c = temperature_c;
     slot->record.last_seen_us = now_us;
     slot->occupied = true;
 }
@@ -138,13 +120,16 @@ size_t battery_store_capacity(void)
 esp_err_t battery_store_record_observation(const char *name,
                                            float voltage_v,
                                            float current_a,
-                                           float soc_percent)
+                                           float soc_percent,
+                                           uint16_t cycle_count,
+                                           bool temperature_valid,
+                                           float temperature_c)
 {
     if (!battery_store_valid_name(name)) {
         return ESP_ERR_INVALID_ARG;
     }
 
-    StoreLock lock;
+    ScopedLock lock(g_mutex);
     if (!lock.locked()) {
         return ESP_ERR_INVALID_STATE;
     }
@@ -162,7 +147,15 @@ esp_err_t battery_store_record_observation(const char *name,
                  name);
     }
 
-    write_record(&g_batteries[slot_index], name, voltage_v, current_a, soc_percent, now_us);
+    write_record(&g_batteries[slot_index],
+                 name,
+                 voltage_v,
+                 current_a,
+                 soc_percent,
+                 cycle_count,
+                 temperature_valid,
+                 temperature_c,
+                 now_us);
     return ESP_OK;
 }
 
@@ -172,7 +165,7 @@ esp_err_t battery_store_get(const char *name, BatteryRecord *record)
         return ESP_ERR_INVALID_ARG;
     }
 
-    StoreLock lock;
+    ScopedLock lock(g_mutex);
     if (!lock.locked()) {
         return ESP_ERR_INVALID_STATE;
     }
@@ -192,7 +185,7 @@ esp_err_t battery_store_list_names(BatteryNameList *names)
         return ESP_ERR_INVALID_ARG;
     }
 
-    StoreLock lock;
+    ScopedLock lock(g_mutex);
     if (!lock.locked()) {
         return ESP_ERR_INVALID_STATE;
     }
@@ -216,7 +209,7 @@ esp_err_t battery_store_snapshot(BatteryRecord *records, size_t capacity, size_t
         return ESP_ERR_INVALID_ARG;
     }
 
-    StoreLock lock;
+    ScopedLock lock(g_mutex);
     if (!lock.locked()) {
         return ESP_ERR_INVALID_STATE;
     }

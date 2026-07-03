@@ -66,4 +66,18 @@ menu "Power4"
             small bounds the persistent configuration blob and the temporary
             memory needed to edit it.
 
+    config POWER4_BATTERY_SCAN_PERIOD_SECONDS
+        int "BLE battery scan period, seconds"
+        default 60
+        range 10 3600
+        help
+            Period between BLE scans for battery management systems.
+
+    config POWER4_BATTERY_SCAN_DURATION_SECONDS
+        int "BLE battery scan duration, seconds"
+        default 10
+        range 1 60
+        help
+            Duration of each BLE scan window for battery management systems.
+
 endmenu

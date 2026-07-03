@@ -14,6 +14,9 @@ struct BatteryRecord {
     float voltage_v;
     float current_a;
     float soc_percent;
+    uint16_t cycle_count;
+    bool temperature_valid;
+    float temperature_c;
     int64_t last_seen_us;
 };
 
@@ -28,7 +31,10 @@ size_t battery_store_capacity(void);
 esp_err_t battery_store_record_observation(const char *name,
                                            float voltage_v,
                                            float current_a,
-                                           float soc_percent);
+                                           float soc_percent,
+                                           uint16_t cycle_count,
+                                           bool temperature_valid,
+                                           float temperature_c);
 esp_err_t battery_store_get(const char *name, BatteryRecord *record);
 esp_err_t battery_store_list_names(BatteryNameList *names);
 esp_err_t battery_store_snapshot(BatteryRecord *records, size_t capacity, size_t *count);

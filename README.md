@@ -102,6 +102,8 @@ CONFIG_POWER4_RELAY_GPIO_MAP="1,2,41,42,45,46"
 CONFIG_POWER4_RELAY_ACTIVE_LEVEL=1
 CONFIG_POWER4_MAX_BATTERIES=16
 CONFIG_POWER4_MAX_BANKS=4
+CONFIG_POWER4_BATTERY_SCAN_PERIOD_SECONDS=60
+CONFIG_POWER4_BATTERY_SCAN_DURATION_SECONDS=10
 ```
 
 `CONFIG_POWER4_RELAY_COUNT` is the number of relay outputs managed by the relay
@@ -130,6 +132,11 @@ full, the least recently seen battery is evicted.
 `CONFIG_POWER4_MAX_BANKS` is the maximum number of named battery banks stored in
 NVS.
 
+`CONFIG_POWER4_BATTERY_SCAN_PERIOD_SECONDS` and
+`CONFIG_POWER4_BATTERY_SCAN_DURATION_SECONDS` control the periodic BLE battery
+scanner. The scanner currently looks for JBD BMS advertisements that expose the
+`0xFF00` service used with `0xFF01` and `0xFF02` characteristics.
+
 For another board, change the relay count, GPIO map, and active level in
 `sdkconfig.defaults`, then regenerate or edit `sdkconfig` and rebuild.
 
@@ -153,6 +160,7 @@ unset
 show
 bank
 relay
+debug
 ```
 
 Relay command examples:
@@ -177,6 +185,17 @@ status
 Set names are stored as boolean flags in the `config` NVS namespace. Names are
 limited to 1-15 characters: letters, digits, underscore, and hyphen.
 
+Debug command examples:
+
+```text
+debug ble_scanner on
+debug ble_scanner off
+```
+
+BLE scanner debug logging defaults to off. Turning it on prints advertisement
+details, scan summaries, raw JBD basic-info packets, and decoded battery packet
+details.
+
 Battery observation examples:
 
 ```text
@@ -184,8 +203,9 @@ show batteries
 ```
 
 Battery observations are kept in memory by name. Each record contains voltage,
-current, state of charge, and last update time. The BLE battery code will record
-observations as battery integrations are added.
+current, state of charge, temperature when reported, cycle count, and last
+update time. The BLE battery code records observations from decoded JBD battery
+packets.
 
 Battery bank examples:
 
