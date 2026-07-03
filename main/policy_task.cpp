@@ -28,8 +28,9 @@ constexpr const char *kTaskName = "policy";
 constexpr TickType_t kPolicyPeriodTicks = pdMS_TO_TICKS(CONFIG_POWER4_POLICY_PERIOD_SECONDS * 1000);
 constexpr int kLuaHookInstructionCount = 1000;
 constexpr uint32_t kRelayPolicyHoldSeconds = 300;
+constexpr size_t kLuaSyslogMessageBytes = 192;
 constexpr const char *kEmptyPolicySource =
-    "print(\"power4 policy: no active configuration\")\n";
+    "syslog(\"power4 policy: no active configuration\")\n";
 
 struct LuaRunContext {
     TickType_t deadline;
@@ -154,6 +155,40 @@ int lua_battery_bank_names(lua_State *state)
     return 1;
 }
 
+int lua_syslog(lua_State *state)
+{
+    char message[kLuaSyslogMessageBytes] = {};
+    size_t used = 0;
+    const int argc = lua_gettop(state);
+
+    for (int i = 1; i <= argc; ++i) {
+        if (i > 1 && used + 1 < sizeof(message)) {
+            message[used] = '\t';
+            ++used;
+            message[used] = '\0';
+        }
+
+        size_t length = 0;
+        const char *text = luaL_tolstring(state, i, &length);
+        if (text == nullptr) {
+            text = "";
+            length = 0;
+        }
+
+        const size_t remaining = sizeof(message) - used - 1;
+        const size_t copy_length = length < remaining ? length : remaining;
+        if (copy_length > 0) {
+            memcpy(message + used, text, copy_length);
+            used += copy_length;
+            message[used] = '\0';
+        }
+        lua_pop(state, 1);
+    }
+
+    ESP_LOGI(kTag, "%s", message);
+    return 0;
+}
+
 void register_policy_lua_functions(lua_State *state)
 {
     lua_pushcfunction(state, lua_relay_on);
@@ -166,6 +201,8 @@ void register_policy_lua_functions(lua_State *state)
     lua_setglobal(state, "battery_bank_state");
     lua_pushcfunction(state, lua_battery_bank_names);
     lua_setglobal(state, "battery_bank_names");
+    lua_pushcfunction(state, lua_syslog);
+    lua_setglobal(state, "syslog");
 }
 
 void open_policy_lua_libraries(lua_State *state)

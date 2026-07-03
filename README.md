@@ -142,12 +142,25 @@ For another board, change the relay count, GPIO map, and active level in
 
 ## Console
 
-The initial firmware starts an ESP-IDF console REPL on the ESP32-S3 USB
-Serial/JTAG console with this prompt:
+The firmware starts a custom line-oriented console on the ESP32-S3 USB
+Serial/JTAG port. It uses ESP-IDF console command dispatch, but keeps the line
+editing deliberately small so both humans and simple serial programs can drive
+it reliably. The prompt is:
 
 ```text
 power4>
 ```
+
+Supported line editing:
+
+```text
+Backspace/Delete  erase the previous character
+Ctrl-U            clear the current input line
+Ctrl-R            redraw the prompt and current input line
+```
+
+ESP log output that arrives while a prompt is active is moved onto its own
+line, then the prompt and any partially typed input are redrawn.
 
 Available starter commands:
 
@@ -246,8 +259,8 @@ any member battery has not been observed, the bank state is `not-ready`.
 Policy execution runs from the `policy_active` NVS key. The policy task creates
 a fresh Lua environment once per minute, loads the active policy, executes it,
 and tears the environment down. If there is no active policy, it runs a tiny
-default Lua script that prints a "no active configuration" message so the Lua
-path is still exercised.
+default Lua script that logs a "no active configuration" message so the Lua path
+is still exercised.
 
 The policy Lua environment currently provides:
 
@@ -255,6 +268,7 @@ The policy Lua environment currently provides:
 relay_on(1)   -- keep relay 1 on for 300 seconds
 relay_off(1)  -- clear relay 1's policy timer
 config_is_set("generator_ok") -- true when set from the console
+syslog("policy reached generator_ok check") -- emit through ESP logging
 
 ready, volts, amps, soc = battery_bank_state("house")
 names = battery_bank_names()

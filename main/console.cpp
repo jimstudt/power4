@@ -1,5 +1,6 @@
 #include "console.hpp"
 
+#include <fcntl.h>
 #include <inttypes.h>
 #include <errno.h>
 #include <ctype.h>
@@ -24,8 +25,20 @@
 #include "esp_heap_caps.h"
 #include "esp_idf_version.h"
 #include "esp_log.h"
+#include "esp_log_write.h"
 #include "esp_system.h"
 #include "esp_timer.h"
+#if CONFIG_ESP_CONSOLE_UART
+#include "driver/uart.h"
+#include "driver/uart_vfs.h"
+#endif
+#if CONFIG_ESP_CONSOLE_USB_CDC
+#include "esp_vfs_cdcacm.h"
+#endif
+#if CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG
+#include "driver/usb_serial_jtag.h"
+#include "driver/usb_serial_jtag_vfs.h"
+#endif
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "mbedtls/base64.h"
@@ -44,10 +57,25 @@ constexpr size_t kBankStateJsonBytesPerBank = 640;
 constexpr size_t kPolicyUploadMaxDecodedBytes = 8192;
 constexpr size_t kPolicyUploadMaxEncodedBytes = ((kPolicyUploadMaxDecodedBytes + 2) / 3) * 4;
 constexpr size_t kPolicyUploadLineBytes = 160;
+constexpr size_t kConsoleLineBytes = 256;
+constexpr uint32_t kConsoleTaskStackBytes = 4096;
+constexpr UBaseType_t kConsoleTaskPriority = 4;
+
+portMUX_TYPE g_console_line_mux = portMUX_INITIALIZER_UNLOCKED;
+char g_console_line[kConsoleLineBytes] = {};
+size_t g_console_line_length = 0;
+bool g_console_prompt_active = false;
+vprintf_like_t g_previous_log_vprintf = nullptr;
 
 int bank_show_command(void);
 int print_policy_slot(PolicySlot slot);
 int system_command(int argc, char **argv);
+
+enum class EscapeState : uint8_t {
+    None,
+    Esc,
+    Csi,
+};
 
 bool parse_u32(const char *text, uint32_t *value)
 {
@@ -64,6 +92,139 @@ bool parse_u32(const char *text, uint32_t *value)
 
     *value = static_cast<uint32_t>(parsed);
     return true;
+}
+
+void draw_prompt_line(const char *line, size_t length)
+{
+    printf("%s", kPrompt);
+    if (length > 0) {
+        fwrite(line, 1, length, stdout);
+    }
+    fflush(stdout);
+}
+
+void redraw_line(const char *line, size_t length)
+{
+    printf("\r\n");
+    draw_prompt_line(line, length);
+}
+
+void set_console_line_snapshot(const char *line, size_t length, bool prompt_active)
+{
+    if (line == nullptr) {
+        length = 0;
+    }
+    if (length >= sizeof(g_console_line)) {
+        length = sizeof(g_console_line) - 1;
+    }
+
+    portENTER_CRITICAL(&g_console_line_mux);
+    if (length > 0) {
+        memcpy(g_console_line, line, length);
+    }
+    g_console_line[length] = '\0';
+    g_console_line_length = length;
+    g_console_prompt_active = prompt_active;
+    portEXIT_CRITICAL(&g_console_line_mux);
+}
+
+bool copy_console_line_snapshot(char *line, size_t capacity, size_t *length, bool *prompt_active)
+{
+    if (line == nullptr || capacity == 0 || length == nullptr || prompt_active == nullptr) {
+        return false;
+    }
+
+    portENTER_CRITICAL(&g_console_line_mux);
+    const size_t copy_length =
+        g_console_line_length < capacity ? g_console_line_length : capacity - 1;
+    if (copy_length > 0) {
+        memcpy(line, g_console_line, copy_length);
+    }
+    line[copy_length] = '\0';
+    *length = copy_length;
+    *prompt_active = g_console_prompt_active;
+    portEXIT_CRITICAL(&g_console_line_mux);
+
+    return true;
+}
+
+void update_console_line_snapshot(const char *line, size_t length, bool prompt_active)
+{
+    set_console_line_snapshot(line, length, prompt_active);
+}
+
+void erase_one_display_char(void)
+{
+    printf("\b \b");
+    fflush(stdout);
+}
+
+void clear_input_line(char *line, size_t *length)
+{
+    if (line == nullptr || length == nullptr) {
+        return;
+    }
+
+    while (*length > 0) {
+        --(*length);
+        line[*length] = '\0';
+        erase_one_display_char();
+    }
+}
+
+bool consume_escape_sequence(char ch, EscapeState *state)
+{
+    if (state == nullptr) {
+        return false;
+    }
+
+    switch (*state) {
+    case EscapeState::None:
+        if (ch == '\x1b') {
+            *state = EscapeState::Esc;
+            return true;
+        }
+        return false;
+
+    case EscapeState::Esc:
+        *state = ch == '[' ? EscapeState::Csi : EscapeState::None;
+        return true;
+
+    case EscapeState::Csi:
+        if ((ch >= '@' && ch <= '~')) {
+            *state = EscapeState::None;
+        }
+        return true;
+    }
+
+    *state = EscapeState::None;
+    return false;
+}
+
+int console_log_vprintf(const char *format, va_list args)
+{
+    char line[kConsoleLineBytes] = {};
+    size_t length = 0;
+    bool prompt_active = false;
+    copy_console_line_snapshot(line, sizeof(line), &length, &prompt_active);
+
+    if (prompt_active) {
+        if (length > 0) {
+            printf(" ...\r\n");
+        } else {
+            printf("\r\n");
+        }
+        fflush(stdout);
+    }
+
+    const int result = g_previous_log_vprintf != nullptr ? g_previous_log_vprintf(format, args)
+                                                         : vprintf(format, args);
+
+    if (prompt_active) {
+        draw_prompt_line(line, length);
+    }
+
+    return result;
 }
 
 bool parse_relay(const char *text, uint8_t *relay)
@@ -1321,46 +1482,183 @@ void register_commands(void)
     register_console_command("policy", "Upload and accept policy programs", &policy_command);
 }
 
-esp_err_t create_repl(esp_console_repl_t **repl)
+esp_err_t setup_console_device(void)
 {
-    esp_console_repl_config_t repl_config = ESP_CONSOLE_REPL_CONFIG_DEFAULT();
-    repl_config.prompt = kPrompt;
-    repl_config.max_cmdline_length = 256;
-
 #if CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG
-    esp_console_dev_usb_serial_jtag_config_t dev_config =
-        ESP_CONSOLE_DEV_USB_SERIAL_JTAG_CONFIG_DEFAULT();
-    return esp_console_new_repl_usb_serial_jtag(&dev_config, &repl_config, repl);
+    usb_serial_jtag_vfs_set_rx_line_endings(ESP_LINE_ENDINGS_CR);
+    usb_serial_jtag_vfs_set_tx_line_endings(ESP_LINE_ENDINGS_CRLF);
+
+    usb_serial_jtag_driver_config_t usb_serial_jtag_config = USB_SERIAL_JTAG_DRIVER_CONFIG_DEFAULT();
+    esp_err_t err = usb_serial_jtag_driver_install(&usb_serial_jtag_config);
+    if (err != ESP_OK) {
+        return err;
+    }
+    usb_serial_jtag_vfs_use_driver();
 #elif CONFIG_ESP_CONSOLE_USB_CDC
-    esp_console_dev_usb_cdc_config_t dev_config =
-        ESP_CONSOLE_DEV_CDC_CONFIG_DEFAULT();
-    return esp_console_new_repl_usb_cdc(&dev_config, &repl_config, repl);
-#elif CONFIG_ESP_CONSOLE_UART
-    esp_console_dev_uart_config_t dev_config =
-        ESP_CONSOLE_DEV_UART_CONFIG_DEFAULT();
-    return esp_console_new_repl_uart(&dev_config, &repl_config, repl);
+    esp_vfs_dev_cdcacm_set_rx_line_endings(ESP_LINE_ENDINGS_CR);
+    esp_vfs_dev_cdcacm_set_tx_line_endings(ESP_LINE_ENDINGS_CRLF);
+#elif CONFIG_ESP_CONSOLE_UART_DEFAULT || CONFIG_ESP_CONSOLE_UART_CUSTOM
+    esp_console_dev_uart_config_t dev_config = ESP_CONSOLE_DEV_UART_CONFIG_DEFAULT();
+
+    uart_vfs_dev_port_set_rx_line_endings(dev_config.channel, ESP_LINE_ENDINGS_CR);
+    uart_vfs_dev_port_set_tx_line_endings(dev_config.channel, ESP_LINE_ENDINGS_CRLF);
+
+    const uart_config_t uart_config = {
+        .baud_rate = dev_config.baud_rate,
+        .data_bits = UART_DATA_8_BITS,
+        .parity = UART_PARITY_DISABLE,
+        .stop_bits = UART_STOP_BITS_1,
+        .flow_ctrl = UART_HW_FLOWCTRL_DISABLE,
+        .source_clk = UART_SCLK_DEFAULT,
+    };
+
+    esp_err_t err = uart_param_config(dev_config.channel, &uart_config);
+    if (err != ESP_OK) {
+        return err;
+    }
+    err = uart_set_pin(dev_config.channel,
+                       dev_config.tx_gpio_num,
+                       dev_config.rx_gpio_num,
+                       UART_PIN_NO_CHANGE,
+                       UART_PIN_NO_CHANGE);
+    if (err != ESP_OK) {
+        return err;
+    }
+    err = uart_driver_install(dev_config.channel, 256, 0, 0, nullptr, 0);
+    if (err != ESP_OK) {
+        return err;
+    }
+    uart_vfs_dev_use_driver(dev_config.channel);
 #else
 #error "No ESP-IDF console device is configured"
 #endif
+
+    fcntl(fileno(stdout), F_SETFL, 0);
+    fcntl(fileno(stdin), F_SETFL, 0);
+    setvbuf(stdin, nullptr, _IONBF, 0);
+    setvbuf(stdout, nullptr, _IONBF, 0);
+
+    esp_console_config_t console_config = ESP_CONSOLE_CONFIG_DEFAULT();
+    console_config.max_cmdline_length = kConsoleLineBytes;
+    return esp_console_init(&console_config);
+}
+
+void run_console_line(char *line)
+{
+    if (line == nullptr || line[0] == '\0') {
+        return;
+    }
+
+    int command_result = 0;
+    const esp_err_t err = esp_console_run(line, &command_result);
+    if (err == ESP_ERR_NOT_FOUND) {
+        printf("unknown command: %s\n", line);
+    } else if (err == ESP_ERR_INVALID_ARG) {
+        printf("invalid command line: %s\n", line);
+    } else if (err != ESP_OK) {
+        printf("command failed: %s\n", esp_err_to_name(err));
+    }
+}
+
+void console_task(void *arg)
+{
+    (void)arg;
+
+    char line[kConsoleLineBytes] = {};
+    size_t length = 0;
+    EscapeState escape_state = EscapeState::None;
+
+    update_console_line_snapshot(line, length, true);
+    draw_prompt_line(line, length);
+
+    while (true) {
+        char ch = '\0';
+        const int read_count = fgetc(stdin);
+        if (read_count == EOF) {
+            vTaskDelay(pdMS_TO_TICKS(10));
+            continue;
+        }
+        ch = static_cast<char>(read_count);
+
+        if (consume_escape_sequence(ch, &escape_state)) {
+            continue;
+        }
+
+        if (ch == '\r' || ch == '\n') {
+            printf("\r\n");
+            line[length] = '\0';
+            update_console_line_snapshot(nullptr, 0, false);
+            run_console_line(line);
+            length = 0;
+            line[0] = '\0';
+            escape_state = EscapeState::None;
+            update_console_line_snapshot(line, length, true);
+            draw_prompt_line(line, length);
+            continue;
+        }
+
+        if (ch == '\x12') {
+            redraw_line(line, length);
+            continue;
+        }
+
+        if (ch == '\x15') {
+            clear_input_line(line, &length);
+            update_console_line_snapshot(line, length, true);
+            continue;
+        }
+
+        if (ch == '\b' || ch == '\x7f') {
+            if (length > 0) {
+                --length;
+                line[length] = '\0';
+                update_console_line_snapshot(line, length, true);
+                erase_one_display_char();
+            }
+            continue;
+        }
+
+        if (!isprint(static_cast<unsigned char>(ch))) {
+            continue;
+        }
+
+        if (length + 1 >= sizeof(line)) {
+            putchar('\a');
+            fflush(stdout);
+            continue;
+        }
+
+        line[length] = ch;
+        ++length;
+        line[length] = '\0';
+        update_console_line_snapshot(line, length, true);
+        putchar(ch);
+        fflush(stdout);
+    }
 }
 
 }  // namespace
 
 esp_err_t power4_console_start(void)
 {
-    register_commands();
-
-    esp_console_repl_t *repl = nullptr;
-    esp_err_t err = create_repl(&repl);
+    esp_err_t err = setup_console_device();
     if (err != ESP_OK) {
-        ESP_LOGE(kTag, "failed to create console REPL: %s", esp_err_to_name(err));
+        ESP_LOGE(kTag, "failed to set up console: %s", esp_err_to_name(err));
         return err;
     }
 
-    err = esp_console_start_repl(repl);
-    if (err != ESP_OK) {
-        ESP_LOGE(kTag, "failed to start console REPL: %s", esp_err_to_name(err));
-        return err;
+    g_previous_log_vprintf = esp_log_set_vprintf(console_log_vprintf);
+    register_commands();
+
+    const BaseType_t created = xTaskCreate(console_task,
+                                           "console",
+                                           kConsoleTaskStackBytes,
+                                           nullptr,
+                                           kConsoleTaskPriority,
+                                           nullptr);
+    if (created != pdPASS) {
+        ESP_LOGE(kTag, "failed to start console task");
+        return ESP_ERR_NO_MEM;
     }
 
     ESP_LOGI(kTag, "console started; type 'help' for commands");
