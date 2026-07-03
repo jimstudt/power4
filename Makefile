@@ -41,7 +41,7 @@ ifneq ($(strip $(BUILD_DIR)),)
 IDF_ARGS += -B $(BUILD_DIR)
 endif
 
-.PHONY: all build package flash monitor menuconfig clean fullclean erase-flash size reconfigure set-target help
+.PHONY: all build package flash monitor menuconfig clean fullclean erase-flash size reconfigure set-target power4ctl power4ctl-clean help
 
 all: build
 
@@ -118,6 +118,12 @@ reconfigure:
 set-target:
 	$(IDF_PY) $(IDF_ARGS) set-target $(IDF_TARGET)
 
+power4ctl:
+	$(MAKE) -C power4ctl
+
+power4ctl-clean:
+	$(MAKE) -C power4ctl clean
+
 help:
 	@printf '%s\n' \
 		'power4 make targets:' \
@@ -132,6 +138,7 @@ help:
 		'  make size         Show firmware size' \
 		'  make reconfigure  Regenerate build system files' \
 		'  make set-target   Set ESP-IDF target, default: esp32s3' \
+		'  make power4ctl   Build the host management tool (power4ctl/)' \
 		'' \
 		'Variables:' \
 		'  IDF_PY=...        Path to idf.py, default: auto from ESP-IDF env or idf.py' \

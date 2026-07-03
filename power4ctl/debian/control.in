@@ -1,0 +1,12 @@
+Package: power4ctl
+Version: @VERSION@
+Architecture: @ARCH@
+Maintainer: Jim Studt <jim@studt.net>
+Depends: libc6
+Section: utils
+Priority: optional
+Description: Serial management tool for the power4 ESP32 device
+ Command-line tool for querying and managing a power4 ESP32 controller
+ over its serial console. Supports JSON state reports for batteries,
+ battery banks, and relays, policy program upload, and general-purpose
+ passthrough access to the device console.

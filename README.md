@@ -33,12 +33,13 @@ The top-level `Makefile` is the user-facing build interface.
 Common targets:
 
 ```sh
-make build
-make package
-make flash
-make monitor
-make menuconfig
-make clean
+make build        # build ESP32 firmware
+make package      # build firmware bundle for Raspberry Pi deployment
+make flash        # flash firmware over USB
+make monitor      # open ESP-IDF serial monitor
+make menuconfig   # open ESP-IDF configuration UI
+make clean        # remove build outputs
+make power4ctl    # build the host management tool
 ```
 
 The project target defaults to `esp32s3`. Activate ESP-IDF before running
@@ -345,6 +346,90 @@ Unset write value: one flag name to unset.
 
 BLE access is currently unauthenticated. Any nearby BLE client that can connect
 can read relay states, read config flags, and set or unset config flags.
+
+## power4ctl
+
+`power4ctl` is the host-side management tool for the controller. It lives under
+`power4ctl/` and is built independently of ESP-IDF. It connects to the device
+over the serial console, elicits the `power4>` prompt, issues a command, and
+returns the result — all with a timeout and exclusive locking so concurrent
+invocations do not collide.
+
+### Building
+
+From the top-level directory:
+
+```sh
+make power4ctl
+```
+
+Or directly:
+
+```sh
+make -C power4ctl
+```
+
+### Installing
+
+```sh
+make -C power4ctl install        # installs to /usr/local/bin
+```
+
+A Debian package for the current architecture can be built and installed with:
+
+```sh
+make -C power4ctl deb
+sudo dpkg -i power4ctl/power4ctl_1.0.0_arm64.deb
+```
+
+### Usage
+
+```text
+power4ctl [-p port] [-b baud] [-t seconds] [-v] command [args...]
+
+Options:
+  -p port      serial port  (default: /dev/ttyACM0)
+  -b baud      baud rate    (default: 115200)
+  -t seconds   timeout      (default: 2)
+  -v           verbose: log bytes sent/received to stderr
+```
+
+### Commands
+
+**JSON reports** — connect to the device, issue the corresponding `report`
+command, validate the P4J1 framed response (length + SHA-1), and print the JSON
+to stdout:
+
+```sh
+power4ctl json batteries
+power4ctl json banks
+power4ctl json relays
+```
+
+**Policy upload** — read a policy file from disk, compute its SHA-1, send
+`policy upload <sha1>` followed by the base64-encoded file and a blank line,
+and report the device's confirmation:
+
+```sh
+power4ctl stage policy.lua
+```
+
+**Passthrough** — any unrecognized command is sent verbatim to the device and
+all output lines are echoed to stdout until the `power4>` prompt returns. This
+provides full console access without a separate terminal emulator:
+
+```sh
+power4ctl show system
+power4ctl set relay 1 on 30
+power4ctl policy accept
+power4ctl help
+```
+
+### Locking
+
+`power4ctl` uses `flock(LOCK_EX|LOCK_NB)` and `TIOCEXCL` immediately after
+opening the port. If another process already holds the port (including a
+`picocom` session), the tool exits immediately with an error.
 
 ## Repository Status
 

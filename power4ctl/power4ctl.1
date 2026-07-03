@@ -1,0 +1,144 @@
+.TH POWER4CTL 1 "July 2026" "power4ctl 1.0.0" "User Commands"
+.SH NAME
+power4ctl \- serial management tool for the power4 ESP32 device
+.SH SYNOPSIS
+.B power4ctl
+.RB [ \-p
+.IR port ]
+.RB [ \-b
+.IR baud ]
+.RB [ \-t
+.IR seconds ]
+.RB [ \-v ]
+.I command
+.RI [ args... ]
+.SH DESCRIPTION
+.B power4ctl
+communicates with a power4 ESP32 device over its serial console.
+It opens the port, acquires an exclusive lock, elicits the
+.B power4>
+prompt, issues a command, and returns the result.
+.PP
+For the
+.BR "json " commands,
+the device responds with a framed-JSON line in the form
+.PP
+.RS
+.EX
+P4J1 \fIsize\fP \fIsha1hex\fP \fIjson\fP
+.EE
+.RE
+.PP
+.B power4ctl
+validates the length and SHA-1 checksum before printing the JSON object
+to standard output.
+Log lines and other console noise from the device are silently ignored.
+.PP
+Any command not listed below is sent verbatim to the device and all
+output lines are echoed to standard output until the
+.B power4>
+prompt returns.
+.SH OPTIONS
+.TP
+.BI \-p " port"
+Serial port to use.
+Default:
+.IR /dev/ttyACM0 .
+.TP
+.BI \-b " baud"
+Baud rate.
+Default:
+.IR 115200 .
+.TP
+.BI \-t " seconds"
+Total timeout for the operation.
+Default:
+.IR 2 .
+.TP
+.B \-v
+Verbose mode.
+Logs every byte sent
+.RB ( >>> )
+and received
+.RB ( <<< )
+to standard error, with non-printable characters shown as
+.BR \en ,
+.BR \er ,
+.BR \et ,
+or
+.BR \exNN .
+.SH COMMANDS
+.TP
+.B json batteries
+Request the current battery observations from the device and print the
+JSON object to standard output.
+.TP
+.B json banks
+Request the current battery bank state from the device and print the
+JSON object to standard output.
+.TP
+.B json relays
+Request the current relay state from the device and print the JSON object
+to standard output.
+.TP
+.BI "stage " filename
+Read
+.I filename
+from disk, compute its SHA-1, and upload it to the device as a staged
+policy program.
+The file is sent base64-encoded in 76-character lines preceded by a
+.B "policy upload \fIsha1hex\fP"
+command.
+A blank line signals end of upload.
+On success, the device's confirmation message is printed to standard output.
+.TP
+.I anything-else
+The command is sent verbatim to the device and all response lines are
+echoed to standard output until the
+.B power4>
+prompt returns.
+This provides full access to the device's console without a separate
+terminal emulator.
+.SH EXIT STATUS
+.TP
+.B 0
+The command completed successfully.
+.TP
+.B 1
+An error occurred (device busy, timeout, checksum mismatch, upload
+failure, etc.).
+A message is printed to standard error.
+.SH FILES
+.TP
+.I /dev/ttyACM0
+Default serial port (USB CDC ACM, used by the ESP32 USB-JTAG/Serial interface).
+.SH LOCKING
+.B power4ctl
+calls
+.BR flock (2)
+with
+.B LOCK_EX|LOCK_NB
+and sets
+.B TIOCEXCL
+on the port immediately after opening it.
+If another process already holds the port, the tool exits immediately
+with an error rather than waiting.
+.SH NOTES
+The port is configured in raw 8N1 mode with the requested baud rate and
+no hardware flow control.
+For USB CDC ACM devices the baud rate setting is advisory and the
+device may ignore it.
+.PP
+The prompt is elicited by sending a carriage return and waiting for
+.BR "power4> " .
+Up to three attempts are made, sharing the timeout evenly.
+.PP
+SHA-1 verification uses a self-contained FIPS\~180-4 implementation with
+no external library dependency.
+.SH SEE ALSO
+.BR picocom (1),
+.BR esptool (1),
+.BR flock (2),
+.BR termios (3)
+.SH AUTHOR
+Jim Studt <jim@studt.net>
