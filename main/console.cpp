@@ -37,9 +37,17 @@ constexpr const char *kTag = "power4_console";
 constexpr const char *kPrompt = "power4> ";
 constexpr size_t kRelayStateJsonBaseBytes = 96;
 constexpr size_t kRelayStateJsonBytesPerRelay = 160;
+constexpr size_t kBatteryStateJsonBaseBytes = 96;
+constexpr size_t kBatteryStateJsonBytesPerBattery = 256;
+constexpr size_t kBankStateJsonBaseBytes = 96;
+constexpr size_t kBankStateJsonBytesPerBank = 640;
 constexpr size_t kPolicyUploadMaxDecodedBytes = 8192;
 constexpr size_t kPolicyUploadMaxEncodedBytes = ((kPolicyUploadMaxDecodedBytes + 2) / 3) * 4;
 constexpr size_t kPolicyUploadLineBytes = 160;
+
+int bank_show_command(void);
+int print_policy_slot(PolicySlot slot);
+int system_command(int argc, char **argv);
 
 bool parse_u32(const char *text, uint32_t *value)
 {
@@ -67,18 +75,6 @@ bool parse_relay(const char *text, uint8_t *relay)
 
     *relay = static_cast<uint8_t>(parsed);
     return true;
-}
-
-void print_relay_usage(void)
-{
-    printf("usage:\n");
-    printf("  relay list\n");
-    printf("  relay query <relay>\n");
-    printf("  relay state\n");
-    printf("  relay on <relay> <seconds>   (seconds must be > 0)\n");
-    printf("  relay force-on <relay>\n");
-    printf("  relay clear-force <relay>\n");
-    printf("relays are numbered 1-%u\n", relay_manager_count());
 }
 
 void print_relay_status(const RelayStatus &status)
@@ -117,25 +113,6 @@ int print_all_relays(void)
     return result;
 }
 
-int print_compact_relay_states(void)
-{
-    printf("relays:");
-
-    for (uint8_t relay = 1; relay <= relay_manager_count(); ++relay) {
-        RelayStatus status = {};
-        const esp_err_t err = relay_manager_query(relay, &status);
-        if (err != ESP_OK) {
-            printf(" %u=error:%s", relay, esp_err_to_name(err));
-            continue;
-        }
-
-        printf(" %u=%s", relay, status.output_on ? "on" : "off");
-    }
-
-    printf("\n");
-    return 0;
-}
-
 int print_config_flags(void)
 {
     ConfigFlagList flags = {};
@@ -159,22 +136,17 @@ int print_config_flags(void)
     return flags.truncated ? 1 : 0;
 }
 
-int status_command(int argc, char **argv)
-{
-    (void)argc;
-    (void)argv;
-
-    printf("power4 console is running\n");
-    printf("mode: startup\n");
-    int result = print_compact_relay_states();
-    result |= print_config_flags();
-    return result;
-}
-
 void print_show_usage(void)
 {
     printf("usage:\n");
     printf("  show batteries\n");
+    printf("  show banks\n");
+    printf("  show debug\n");
+    printf("  show policy\n");
+    printf("  show policy-flags\n");
+    printf("  show policy staged\n");
+    printf("  show relays\n");
+    printf("  show system\n");
 }
 
 int show_batteries_command(void)
@@ -234,6 +206,13 @@ int show_batteries_command(void)
     return 0;
 }
 
+int show_debug_command(void)
+{
+    printf("debug:\n");
+    printf("  ble_scanner=%s\n", battery_scanner_verbose_enabled() ? "on" : "off");
+    return 0;
+}
+
 int show_command(int argc, char **argv)
 {
     if (argc < 2 || strcmp(argv[1], "help") == 0) {
@@ -249,16 +228,60 @@ int show_command(int argc, char **argv)
         return show_batteries_command();
     }
 
+    if (strcmp(argv[1], "banks") == 0) {
+        if (argc != 2) {
+            print_show_usage();
+            return 1;
+        }
+        return bank_show_command();
+    }
+
+    if (strcmp(argv[1], "debug") == 0) {
+        if (argc != 2) {
+            print_show_usage();
+            return 1;
+        }
+        return show_debug_command();
+    }
+
+    if (strcmp(argv[1], "policy") == 0) {
+        if (argc == 2) {
+            return print_policy_slot(PolicySlot::Active);
+        }
+        if (argc == 3 && strcmp(argv[2], "staged") == 0) {
+            return print_policy_slot(PolicySlot::Staged);
+        }
+
+        print_show_usage();
+        return 1;
+    }
+
+    if (strcmp(argv[1], "policy-flags") == 0) {
+        if (argc != 2) {
+            print_show_usage();
+            return 1;
+        }
+        return print_config_flags();
+    }
+
+    if (strcmp(argv[1], "relays") == 0) {
+        if (argc != 2) {
+            print_show_usage();
+            return 1;
+        }
+        return print_all_relays();
+    }
+
+    if (strcmp(argv[1], "system") == 0) {
+        if (argc != 2) {
+            print_show_usage();
+            return 1;
+        }
+        return system_command(argc, argv);
+    }
+
     print_show_usage();
     return 1;
-}
-
-void print_bank_usage(void)
-{
-    printf("usage:\n");
-    printf("  bank create <name> <battery> [battery...]\n");
-    printf("  bank show\n");
-    printf("  bank remove <name>\n");
 }
 
 int bank_show_command(void)
@@ -311,23 +334,148 @@ int bank_show_command(void)
     return 0;
 }
 
-int bank_command(int argc, char **argv)
+bool parse_on_off(const char *text, bool *value)
+{
+    if (text == nullptr || value == nullptr) {
+        return false;
+    }
+    if (strcmp(text, "on") == 0 || strcmp(text, "true") == 0) {
+        *value = true;
+        return true;
+    }
+    if (strcmp(text, "off") == 0 || strcmp(text, "false") == 0) {
+        *value = false;
+        return true;
+    }
+    return false;
+}
+
+bool split_assignment(char *text, char **name, char **value)
+{
+    if (text == nullptr || name == nullptr || value == nullptr) {
+        return false;
+    }
+
+    char *equals = strchr(text, '=');
+    if (equals == nullptr || equals == text || equals[1] == '\0') {
+        return false;
+    }
+
+    *equals = '\0';
+    *name = text;
+    *value = equals + 1;
+    return true;
+}
+
+void print_set_usage(void)
+{
+    printf("usage:\n");
+    printf("  set debug ble_scanner on\n");
+    printf("  set debug ble_scanner off\n");
+    printf("  set relay <relay> on [seconds]\n");
+    printf("  set relay <relay> force-on\n");
+    printf("  set relay <relay> clear-force\n");
+}
+
+int set_command(int argc, char **argv)
 {
     if (argc < 2 || strcmp(argv[1], "help") == 0) {
-        print_bank_usage();
+        print_set_usage();
         return argc < 2 ? 1 : 0;
     }
 
-    if (strcmp(argv[1], "create") == 0) {
-        if (argc < 4 || !battery_bank_valid_name(argv[2])) {
-            print_bank_usage();
+    if (strcmp(argv[1], "debug") == 0) {
+        bool enabled = false;
+        if (argc != 4 || strcmp(argv[2], "ble_scanner") != 0 || !parse_on_off(argv[3], &enabled)) {
+            print_set_usage();
+            return 1;
+        }
+
+        battery_scanner_set_verbose(enabled);
+        printf("debug ble_scanner %s\n", battery_scanner_verbose_enabled() ? "on" : "off");
+        return 0;
+    }
+
+    if (strcmp(argv[1], "relay") == 0) {
+        uint8_t relay = 0;
+        if ((argc < 4 || argc > 5) || !parse_relay(argv[2], &relay)) {
+            print_set_usage();
+            return 1;
+        }
+
+        if (strcmp(argv[3], "on") == 0) {
+            uint32_t seconds = 300;
+            if (argc == 5 && (!parse_u32(argv[4], &seconds) || seconds == 0)) {
+                print_set_usage();
+                return 1;
+            }
+            const esp_err_t err = relay_manager_on_for(relay, seconds);
+            if (err != ESP_OK) {
+                printf("set relay failed: %s\n", esp_err_to_name(err));
+                return 1;
+            }
+            return query_and_print_relay(relay);
+        }
+
+        if (strcmp(argv[3], "clear-force") == 0) {
+            if (argc != 4) {
+                print_set_usage();
+                return 1;
+            }
+            const esp_err_t err = relay_manager_clear_force(relay);
+            if (err != ESP_OK) {
+                printf("set relay failed: %s\n", esp_err_to_name(err));
+                return 1;
+            }
+            return query_and_print_relay(relay);
+        }
+
+        if (strcmp(argv[3], "force-on") == 0) {
+            if (argc != 4) {
+                print_set_usage();
+                return 1;
+            }
+            const esp_err_t err = relay_manager_force_on(relay);
+            if (err != ESP_OK) {
+                printf("set relay failed: %s\n", esp_err_to_name(err));
+                return 1;
+            }
+            return query_and_print_relay(relay);
+        }
+
+        print_set_usage();
+        return 1;
+    }
+
+    print_set_usage();
+    return 1;
+}
+
+void print_define_usage(void)
+{
+    printf("usage:\n");
+    printf("  define bank <name> <battery> [battery...]\n");
+    printf("  define policy <name>=true\n");
+    printf("  define policy <name>=false\n");
+}
+
+int define_command(int argc, char **argv)
+{
+    if (argc < 2 || strcmp(argv[1], "help") == 0) {
+        print_define_usage();
+        return argc < 2 ? 1 : 0;
+    }
+
+    if (strcmp(argv[1], "bank") == 0) {
+        if (argc < 5 || !battery_bank_valid_name(argv[2])) {
+            print_define_usage();
             return 1;
         }
 
         const size_t battery_count = static_cast<size_t>(argc - 3);
         const char *battery_names[CONFIG_POWER4_MAX_BATTERIES] = {};
         if (battery_count > CONFIG_POWER4_MAX_BATTERIES) {
-            print_bank_usage();
+            print_define_usage();
             return 1;
         }
         for (size_t i = 0; i < battery_count; ++i) {
@@ -336,11 +484,11 @@ int bank_command(int argc, char **argv)
 
         const esp_err_t err = battery_bank_create(argv[2], battery_names, battery_count);
         if (err != ESP_OK) {
-            printf("bank create failed: %s\n", esp_err_to_name(err));
+            printf("define bank failed: %s\n", esp_err_to_name(err));
             return 1;
         }
 
-        printf("bank %s:", argv[2]);
+        printf("defined bank %s:", argv[2]);
         for (size_t i = 0; i < battery_count; ++i) {
             printf(" %s", battery_names[i]);
         }
@@ -348,87 +496,89 @@ int bank_command(int argc, char **argv)
         return 0;
     }
 
-    if (strcmp(argv[1], "show") == 0) {
-        if (argc != 2) {
-            print_bank_usage();
+    if (strcmp(argv[1], "policy") == 0) {
+        char *name = nullptr;
+        char *value_text = nullptr;
+        bool value = false;
+        if (argc != 3 || !split_assignment(argv[2], &name, &value_text) ||
+            !config_flags_valid_name(name) || !parse_on_off(value_text, &value)) {
+            print_define_usage();
             return 1;
         }
-        return bank_show_command();
+
+        const esp_err_t err = value ? config_flags_set(name) : config_flags_unset(name);
+        if (err != ESP_OK) {
+            printf("define policy %s failed: %s\n", name, esp_err_to_name(err));
+            return 1;
+        }
+
+        printf("policy %s=%s\n", name, value ? "true" : "false");
+        return 0;
     }
 
-    if (strcmp(argv[1], "remove") == 0) {
+    print_define_usage();
+    return 1;
+}
+
+void print_remove_usage(void)
+{
+    printf("usage:\n");
+    printf("  remove bank <name>\n");
+    printf("  remove policy <name>\n");
+}
+
+int remove_command(int argc, char **argv)
+{
+    if (argc < 2 || strcmp(argv[1], "help") == 0) {
+        print_remove_usage();
+        return argc < 2 ? 1 : 0;
+    }
+
+    if (strcmp(argv[1], "bank") == 0) {
         if (argc != 3 || !battery_bank_valid_name(argv[2])) {
-            print_bank_usage();
+            print_remove_usage();
             return 1;
         }
 
         const esp_err_t err = battery_bank_remove(argv[2]);
         if (err == ESP_ERR_NOT_FOUND) {
-            printf("bank remove %s failed: not found\n", argv[2]);
+            printf("remove bank %s failed: not found\n", argv[2]);
             return 1;
         }
         if (err != ESP_OK) {
-            printf("bank remove %s failed: %s\n", argv[2], esp_err_to_name(err));
+            printf("remove bank %s failed: %s\n", argv[2], esp_err_to_name(err));
             return 1;
         }
 
-        printf("bank removed %s\n", argv[2]);
+        printf("removed bank %s\n", argv[2]);
         return 0;
     }
 
-    print_bank_usage();
+    if (strcmp(argv[1], "policy") == 0) {
+        if (argc != 3 || !config_flags_valid_name(argv[2])) {
+            print_remove_usage();
+            return 1;
+        }
+
+        bool was_set = false;
+        esp_err_t err = config_flags_is_set(argv[2], &was_set);
+        if (err != ESP_OK) {
+            printf("remove policy %s failed: %s\n", argv[2], esp_err_to_name(err));
+            return 1;
+        }
+
+        err = config_flags_unset(argv[2]);
+        if (err != ESP_OK) {
+            printf("remove policy %s failed: %s\n", argv[2], esp_err_to_name(err));
+            return 1;
+        }
+
+        printf("removed policy %s%s\n", argv[2], was_set ? "" : " (was not defined)");
+        return 0;
+    }
+
+    print_remove_usage();
     return 1;
-}
-
-void print_set_usage(const char *command)
-{
-    printf("usage: %s <name>\n", command);
-    printf("name: 1-15 characters, letters/digits/_/-\n");
-}
-
-int set_command(int argc, char **argv)
-{
-    if (argc != 2 || !config_flags_valid_name(argv[1])) {
-        print_set_usage("set");
-        return 1;
-    }
-
-    const esp_err_t err = config_flags_set(argv[1]);
-    if (err != ESP_OK) {
-        printf("set %s failed: %s\n", argv[1], esp_err_to_name(err));
-        return 1;
-    }
-
-    printf("set %s\n", argv[1]);
-    return 0;
-}
-
-int unset_command(int argc, char **argv)
-{
-    if (argc != 2 || !config_flags_valid_name(argv[1])) {
-        print_set_usage("unset");
-        return 1;
-    }
-
-    bool was_set = false;
-    esp_err_t err = config_flags_is_set(argv[1], &was_set);
-    if (err != ESP_OK) {
-        printf("unset %s failed: %s\n", argv[1], esp_err_to_name(err));
-        return 1;
-    }
-
-    err = config_flags_unset(argv[1]);
-    if (err != ESP_OK) {
-        printf("unset %s failed: %s\n", argv[1], esp_err_to_name(err));
-        return 1;
-    }
-
-    if (was_set) {
-        printf("unset %s\n", argv[1]);
-    } else {
-        printf("unset %s (was not set)\n", argv[1]);
-    }
-    return 0;
 }
 
 bool append_json(char *buffer, size_t capacity, size_t *used, const char *format, ...)
@@ -450,14 +600,38 @@ bool append_json(char *buffer, size_t capacity, size_t *used, const char *format
     return true;
 }
 
-int relay_state_command(void)
+bool append_json_string(char *buffer, size_t capacity, size_t *used, const char *text)
+{
+    if (!append_json(buffer, capacity, used, "\"")) {
+        return false;
+    }
+
+    for (const char *cursor = text; cursor != nullptr && *cursor != '\0'; ++cursor) {
+        const unsigned char ch = static_cast<unsigned char>(*cursor);
+        if (ch == '"' || ch == '\\') {
+            if (!append_json(buffer, capacity, used, "\\%c", ch)) {
+                return false;
+            }
+        } else if (ch >= ' ' && ch <= '~') {
+            if (!append_json(buffer, capacity, used, "%c", ch)) {
+                return false;
+            }
+        } else if (!append_json(buffer, capacity, used, "\\u%04x", ch)) {
+            return false;
+        }
+    }
+
+    return append_json(buffer, capacity, used, "\"");
+}
+
+int report_relays_command(void)
 {
     const uint8_t relay_count = relay_manager_count();
     const size_t capacity =
         kRelayStateJsonBaseBytes + (static_cast<size_t>(relay_count) * kRelayStateJsonBytesPerRelay);
     char *json = static_cast<char *>(malloc(capacity));
     if (json == nullptr) {
-        printf("relay state failed: out of memory\n");
+        printf("report relays failed: out of memory\n");
         return 1;
     }
 
@@ -472,7 +646,7 @@ int relay_state_command(void)
         RelayStatus status = {};
         const esp_err_t err = relay_manager_query(relay, &status);
         if (err != ESP_OK) {
-            printf("relay state failed: relay %u query: %s\n", relay, esp_err_to_name(err));
+            printf("report relays failed: relay %u query: %s\n", relay, esp_err_to_name(err));
             free(json);
             return 1;
         }
@@ -495,7 +669,7 @@ int relay_state_command(void)
 
     ok = ok && append_json(json, capacity, &used, "]}");
     if (!ok) {
-        printf("relay state failed: JSON buffer too small\n");
+        printf("report relays failed: JSON buffer too small\n");
         free(json);
         return 1;
     }
@@ -503,103 +677,217 @@ int relay_state_command(void)
     const esp_err_t err = json_output_print(json);
     free(json);
     if (err != ESP_OK) {
-        printf("relay state failed: %s\n", esp_err_to_name(err));
+        printf("report relays failed: %s\n", esp_err_to_name(err));
         return 1;
     }
 
     return 0;
 }
 
-int relay_command(int argc, char **argv)
+int report_batteries_command(void)
+{
+    BatteryRecord records[CONFIG_POWER4_MAX_BATTERIES] = {};
+    size_t count = 0;
+    esp_err_t err = battery_store_snapshot(records, CONFIG_POWER4_MAX_BATTERIES, &count);
+    if (err != ESP_OK) {
+        printf("report batteries failed: %s\n", esp_err_to_name(err));
+        return 1;
+    }
+
+    const size_t capacity = kBatteryStateJsonBaseBytes +
+                            (CONFIG_POWER4_MAX_BATTERIES * kBatteryStateJsonBytesPerBattery);
+    char *json = static_cast<char *>(malloc(capacity));
+    if (json == nullptr) {
+        printf("report batteries failed: out of memory\n");
+        return 1;
+    }
+
+    size_t used = 0;
+    bool ok = append_json(json,
+                          capacity,
+                          &used,
+                          "{\"type\":\"battery_state\",\"capacity\":%u,\"count\":%u,\"batteries\":[",
+                          static_cast<unsigned>(battery_store_capacity()),
+                          static_cast<unsigned>(count));
+
+    for (size_t i = 0; ok && i < count; ++i) {
+        ok = append_json(json, capacity, &used, "%s{\"name\":", i == 0 ? "" : ",");
+        ok = ok && append_json_string(json, capacity, &used, records[i].name);
+        ok = ok && append_json(json,
+                               capacity,
+                               &used,
+                               ",\"voltage_v\":%.3f,\"current_a\":%.3f,"
+                               "\"soc_percent\":%.1f,\"cycle_count\":%u,"
+                               "\"temperature_c\":",
+                               static_cast<double>(records[i].voltage_v),
+                               static_cast<double>(records[i].current_a),
+                               static_cast<double>(records[i].soc_percent),
+                               records[i].cycle_count);
+        if (ok && records[i].temperature_valid) {
+            ok = append_json(json,
+                             capacity,
+                             &used,
+                             "%.1f",
+                             static_cast<double>(records[i].temperature_c));
+        } else if (ok) {
+            ok = append_json(json, capacity, &used, "null");
+        }
+        ok = ok && append_json(json, capacity, &used, ",\"last_seen_us\":%" PRId64 "}", records[i].last_seen_us);
+    }
+
+    ok = ok && append_json(json, capacity, &used, "]}");
+    if (!ok) {
+        printf("report batteries failed: JSON buffer too small\n");
+        free(json);
+        return 1;
+    }
+
+    err = json_output_print(json);
+    free(json);
+    if (err != ESP_OK) {
+        printf("report batteries failed: %s\n", esp_err_to_name(err));
+        return 1;
+    }
+
+    return 0;
+}
+
+int report_banks_command(void)
+{
+    BatteryBankList *banks = static_cast<BatteryBankList *>(malloc(sizeof(BatteryBankList)));
+    if (banks == nullptr) {
+        printf("report banks failed: out of memory\n");
+        return 1;
+    }
+
+    esp_err_t err = battery_bank_list(banks);
+    if (err != ESP_OK) {
+        printf("report banks failed: %s\n", esp_err_to_name(err));
+        free(banks);
+        return 1;
+    }
+
+    const size_t capacity =
+        kBankStateJsonBaseBytes + (kBatteryBankMaxBanks * kBankStateJsonBytesPerBank);
+    char *json = static_cast<char *>(malloc(capacity));
+    if (json == nullptr) {
+        printf("report banks failed: out of memory\n");
+        free(banks);
+        return 1;
+    }
+
+    size_t used = 0;
+    bool ok = append_json(json,
+                          capacity,
+                          &used,
+                          "{\"type\":\"battery_bank_state\",\"capacity\":%u,\"count\":%u,\"banks\":[",
+                          static_cast<unsigned>(kBatteryBankMaxBanks),
+                          static_cast<unsigned>(banks->count));
+
+    for (size_t i = 0; ok && i < banks->count; ++i) {
+        const BatteryBankDefinition &bank = banks->banks[i];
+        BatteryBankState state = {};
+        const esp_err_t state_err = battery_bank_get_state(bank.name, &state);
+
+        ok = append_json(json, capacity, &used, "%s{\"name\":", i == 0 ? "" : ",");
+        ok = ok && append_json_string(json, capacity, &used, bank.name);
+        ok = ok && append_json(json, capacity, &used, ",\"members\":[");
+        for (size_t j = 0; ok && j < bank.battery_count; ++j) {
+            ok = append_json(json, capacity, &used, "%s", j == 0 ? "" : ",");
+            ok = ok && append_json_string(json, capacity, &used, bank.batteries[j]);
+        }
+        ok = ok && append_json(json,
+                               capacity,
+                               &used,
+                               "],\"ready\":%s,\"voltage_v\":",
+                               state_err == ESP_OK && state.ready ? "true" : "false");
+
+        if (ok && state_err == ESP_OK && state.ready) {
+            ok = append_json(json,
+                             capacity,
+                             &used,
+                             "%.3f,\"current_a\":%.3f,\"soc_percent\":%.1f",
+                             static_cast<double>(state.voltage_v),
+                             static_cast<double>(state.current_a),
+                             static_cast<double>(state.soc_percent));
+        } else {
+            ok = append_json(json, capacity, &used, "null,\"current_a\":null,\"soc_percent\":null");
+        }
+
+        if (ok && state_err != ESP_OK) {
+            ok = append_json(json, capacity, &used, ",\"error\":");
+            ok = ok && append_json_string(json, capacity, &used, esp_err_to_name(state_err));
+        }
+        ok = ok && append_json(json, capacity, &used, "}");
+    }
+
+    ok = ok && append_json(json, capacity, &used, "]}");
+    if (!ok) {
+        printf("report banks failed: JSON buffer too small\n");
+        free(json);
+        free(banks);
+        return 1;
+    }
+
+    err = json_output_print(json);
+    free(json);
+    free(banks);
+    if (err != ESP_OK) {
+        printf("report banks failed: %s\n", esp_err_to_name(err));
+        return 1;
+    }
+
+    return 0;
+}
+
+void print_report_usage(void)
+{
+    printf("usage:\n");
+    printf("  report banks\n");
+    printf("  report batteries\n");
+    printf("  report relays\n");
+}
+
+int report_command(int argc, char **argv)
 {
     if (argc < 2 || strcmp(argv[1], "help") == 0) {
-        print_relay_usage();
+        print_report_usage();
         return argc < 2 ? 1 : 0;
     }
 
-    if (strcmp(argv[1], "list") == 0) {
+    if (strcmp(argv[1], "relays") == 0) {
         if (argc != 2) {
-            print_relay_usage();
+            print_report_usage();
             return 1;
         }
-        return print_all_relays();
+        return report_relays_command();
     }
 
-    if (strcmp(argv[1], "query") == 0) {
-        uint8_t relay = 0;
-        if (argc != 3 || !parse_relay(argv[2], &relay)) {
-            print_relay_usage();
-            return 1;
-        }
-        return query_and_print_relay(relay);
-    }
-
-    if (strcmp(argv[1], "state") == 0) {
+    if (strcmp(argv[1], "banks") == 0) {
         if (argc != 2) {
-            print_relay_usage();
+            print_report_usage();
             return 1;
         }
-        return relay_state_command();
+        return report_banks_command();
     }
 
-    if (strcmp(argv[1], "on") == 0) {
-        uint8_t relay = 0;
-        uint32_t seconds = 0;
-        if (argc != 4 || !parse_relay(argv[2], &relay) || !parse_u32(argv[3], &seconds) ||
-            seconds == 0) {
-            print_relay_usage();
+    if (strcmp(argv[1], "batteries") == 0) {
+        if (argc != 2) {
+            print_report_usage();
             return 1;
         }
-
-        const esp_err_t err = relay_manager_on_for(relay, seconds);
-        if (err != ESP_OK) {
-            printf("relay on failed: %s\n", esp_err_to_name(err));
-            return 1;
-        }
-        return query_and_print_relay(relay);
+        return report_batteries_command();
     }
 
-    if (strcmp(argv[1], "force-on") == 0) {
-        uint8_t relay = 0;
-        if (argc != 3 || !parse_relay(argv[2], &relay)) {
-            print_relay_usage();
-            return 1;
-        }
-
-        const esp_err_t err = relay_manager_force_on(relay);
-        if (err != ESP_OK) {
-            printf("relay force-on failed: %s\n", esp_err_to_name(err));
-            return 1;
-        }
-        return query_and_print_relay(relay);
-    }
-
-    if (strcmp(argv[1], "clear-force") == 0) {
-        uint8_t relay = 0;
-        if (argc != 3 || !parse_relay(argv[2], &relay)) {
-            print_relay_usage();
-            return 1;
-        }
-
-        const esp_err_t err = relay_manager_clear_force(relay);
-        if (err != ESP_OK) {
-            printf("relay clear-force failed: %s\n", esp_err_to_name(err));
-            return 1;
-        }
-        return query_and_print_relay(relay);
-    }
-
-    print_relay_usage();
+    print_report_usage();
     return 1;
 }
 
-void print_config_usage(void)
+void print_policy_usage(void)
 {
     printf("usage:\n");
-    printf("  config show [active]\n");
-    printf("  config show staged\n");
-    printf("  config upload staged <sha1-hex>\n");
-    printf("  config accept staged\n");
+    printf("  policy upload <sha1-hex>\n");
+    printf("  policy accept\n");
 }
 
 bool is_base64_char(char c)
@@ -630,12 +918,12 @@ bool append_base64_line(char *encoded, size_t capacity, size_t *used, const char
     return true;
 }
 
-int config_upload_staged(const uint8_t expected_sha1[kChecksumSha1Bytes])
+int policy_upload_staged(const uint8_t expected_sha1[kChecksumSha1Bytes])
 {
     char *encoded = static_cast<char *>(malloc(kPolicyUploadMaxEncodedBytes + 1));
     uint8_t *decoded = static_cast<uint8_t *>(malloc(kPolicyUploadMaxDecodedBytes + 1));
     if (encoded == nullptr || decoded == nullptr) {
-        printf("config upload staged failed: out of memory\n");
+        printf("policy upload failed: out of memory\n");
         free(encoded);
         free(decoded);
         return 1;
@@ -670,7 +958,7 @@ int config_upload_staged(const uint8_t expected_sha1[kChecksumSha1Bytes])
                                 kPolicyUploadMaxEncodedBytes,
                                 &encoded_length,
                                 line)) {
-            printf("config upload staged failed: encoded input too large\n");
+            printf("policy upload failed: encoded input too large\n");
             free(encoded);
             free(decoded);
             return 1;
@@ -684,7 +972,7 @@ int config_upload_staged(const uint8_t expected_sha1[kChecksumSha1Bytes])
                                                    reinterpret_cast<const unsigned char *>(encoded),
                                                    encoded_length);
     if (decode_result != 0) {
-        printf("config upload staged failed: invalid base64 (%d)\n", decode_result);
+        printf("policy upload failed: invalid base64 (%d)\n", decode_result);
         free(encoded);
         free(decoded);
         return 1;
@@ -694,7 +982,7 @@ int config_upload_staged(const uint8_t expected_sha1[kChecksumSha1Bytes])
     uint8_t actual_sha1[kChecksumSha1Bytes] = {};
     esp_err_t err = checksum_sha1(decoded, decoded_length, actual_sha1);
     if (err != ESP_OK) {
-        printf("config upload staged failed: checksum calculation: %s\n", esp_err_to_name(err));
+        printf("policy upload failed: checksum calculation: %s\n", esp_err_to_name(err));
         free(encoded);
         free(decoded);
         return 1;
@@ -706,7 +994,7 @@ int config_upload_staged(const uint8_t expected_sha1[kChecksumSha1Bytes])
     checksum_bytes_to_hex(actual_sha1, kChecksumSha1Bytes, actual_hex, sizeof(actual_hex));
 
     if (memcmp(actual_sha1, expected_sha1, kChecksumSha1Bytes) != 0) {
-        printf("config upload staged failed: checksum mismatch expected=%s actual=%s\n",
+        printf("policy upload failed: checksum mismatch expected=%s actual=%s\n",
                expected_hex,
                actual_hex);
         free(encoded);
@@ -716,7 +1004,7 @@ int config_upload_staged(const uint8_t expected_sha1[kChecksumSha1Bytes])
 
     err = policy_storage_write_staged(decoded, decoded_length);
     if (err != ESP_OK) {
-        printf("config upload staged failed: %s\n", esp_err_to_name(err));
+        printf("policy upload failed: %s\n", esp_err_to_name(err));
         free(encoded);
         free(decoded);
         return 1;
@@ -737,13 +1025,13 @@ int print_policy_slot(PolicySlot slot)
     size_t length = 0;
     const esp_err_t err = policy_storage_read_alloc(slot, &contents, &length);
     if (err != ESP_OK) {
-        printf("config show %s failed: %s\n",
+        printf("show policy %s failed: %s\n",
                policy_storage_slot_name(slot),
                esp_err_to_name(err));
         return 1;
     }
 
-    printf("config %s: %u bytes\n",
+    printf("policy %s: %u bytes\n",
            policy_storage_slot_name(slot),
            static_cast<unsigned>(length));
     if (length > 0) {
@@ -757,86 +1045,41 @@ int print_policy_slot(PolicySlot slot)
     return 0;
 }
 
-int config_command(int argc, char **argv)
+int policy_command(int argc, char **argv)
 {
     if (argc < 2 || strcmp(argv[1], "help") == 0) {
-        print_config_usage();
+        print_policy_usage();
         return argc < 2 ? 1 : 0;
-    }
-
-    if (strcmp(argv[1], "show") == 0) {
-        if (argc == 2 || (argc == 3 && strcmp(argv[2], "active") == 0)) {
-            return print_policy_slot(PolicySlot::Active);
-        }
-        if (argc == 3 && strcmp(argv[2], "staged") == 0) {
-            return print_policy_slot(PolicySlot::Staged);
-        }
-
-        print_config_usage();
-        return 1;
     }
 
     if (strcmp(argv[1], "upload") == 0) {
         uint8_t expected_sha1[kChecksumSha1Bytes] = {};
-        if (argc != 4 || strcmp(argv[2], "staged") != 0 ||
-            !checksum_parse_sha1_hex(argv[3], expected_sha1)) {
-            print_config_usage();
+        if (argc != 3 || !checksum_parse_sha1_hex(argv[2], expected_sha1)) {
+            print_policy_usage();
             return 1;
         }
 
-        return config_upload_staged(expected_sha1);
+        return policy_upload_staged(expected_sha1);
     }
 
     if (strcmp(argv[1], "accept") == 0) {
-        if (argc != 3 || strcmp(argv[2], "staged") != 0) {
-            print_config_usage();
+        if (argc != 2) {
+            print_policy_usage();
             return 1;
         }
 
         const esp_err_t err = policy_storage_accept_staged();
         if (err != ESP_OK) {
-            printf("config accept staged failed: %s\n", esp_err_to_name(err));
+            printf("policy accept failed: %s\n", esp_err_to_name(err));
             return 1;
         }
 
-        printf("accepted staged configuration as active\n");
+        printf("accepted staged policy as active\n");
         return 0;
     }
 
-    print_config_usage();
+    print_policy_usage();
     return 1;
-}
-
-void print_debug_usage(void)
-{
-    printf("usage:\n");
-    printf("  debug ble_scanner on\n");
-    printf("  debug ble_scanner off\n");
-}
-
-int debug_command(int argc, char **argv)
-{
-    if (argc < 2 || strcmp(argv[1], "help") == 0) {
-        print_debug_usage();
-        return argc < 2 ? 1 : 0;
-    }
-
-    if (strcmp(argv[1], "ble_scanner") != 0 || argc != 3) {
-        print_debug_usage();
-        return 1;
-    }
-
-    if (strcmp(argv[2], "on") == 0) {
-        battery_scanner_set_verbose(true);
-    } else if (strcmp(argv[2], "off") == 0) {
-        battery_scanner_set_verbose(false);
-    } else {
-        print_debug_usage();
-        return 1;
-    }
-
-    printf("debug ble_scanner %s\n", battery_scanner_verbose_enabled() ? "on" : "off");
-    return 0;
 }
 
 const char *task_state_name(eTaskState state)
@@ -972,6 +1215,11 @@ int system_command(int argc, char **argv)
     uint32_t flash_size = 0;
     esp_chip_info(&chip);
     const esp_err_t flash_err = esp_flash_get_size(nullptr, &flash_size);
+    const uint64_t uptime_s = static_cast<uint64_t>(esp_timer_get_time() / 1000000LL);
+    const uint64_t uptime_days = uptime_s / 86400ULL;
+    const uint64_t uptime_hours = (uptime_s / 3600ULL) % 24ULL;
+    const uint64_t uptime_minutes = (uptime_s / 60ULL) % 60ULL;
+    const uint64_t uptime_seconds = uptime_s % 60ULL;
 
     printf("app: %s version=%s idf=%s built=%s %s\n",
            app->project_name,
@@ -979,6 +1227,12 @@ int system_command(int argc, char **argv)
            IDF_VER,
            app->date,
            app->time);
+    printf("uptime: %" PRIu64 "s (%" PRIu64 "d %" PRIu64 "h %" PRIu64 "m %" PRIu64 "s)\n",
+           uptime_s,
+           uptime_days,
+           uptime_hours,
+           uptime_minutes,
+           uptime_seconds);
     printf("chip: model=%s revision=%u cores=%u features=0x%08" PRIx32 "\n",
            CONFIG_IDF_TARGET,
            chip.revision,
@@ -1003,72 +1257,68 @@ int system_command(int argc, char **argv)
     return 0;
 }
 
+int power4_help_command(int argc, char **argv)
+{
+    (void)argc;
+    (void)argv;
+
+    printf("power4 commands:\n");
+    printf("\n");
+    printf("show:\n");
+    printf("  show batteries              list observed batteries\n");
+    printf("  show banks                  list configured battery banks\n");
+    printf("  show debug                  show volatile debug settings\n");
+    printf("  show policy                 print the active policy program\n");
+    printf("  show policy staged          print the staged policy program\n");
+    printf("  show policy-flags           list persistent policy flags\n");
+    printf("  show relays                 list relay state\n");
+    printf("  show system                 show firmware, uptime, heap, NVS, and tasks\n");
+    printf("\n");
+    printf("report:\n");
+    printf("  report banks                print framed JSON battery-bank state\n");
+    printf("  report batteries            print framed JSON battery observations\n");
+    printf("  report relays               print framed JSON relay state\n");
+    printf("\n");
+    printf("set:\n");
+    printf("  set debug ble_scanner on    enable verbose BLE scanner logging\n");
+    printf("  set debug ble_scanner off   disable verbose BLE scanner logging\n");
+    printf("  set relay <n> on [seconds]  turn relay on for a bounded time\n");
+    printf("  set relay <n> force-on      force relay on administratively\n");
+    printf("  set relay <n> clear-force   clear administrative force-on\n");
+    printf("\n");
+    printf("define/remove:\n");
+    printf("  define bank <name> <battery> [battery...]\n");
+    printf("  remove bank <name>\n");
+    printf("  define policy <name>=true|false\n");
+    printf("  remove policy <name>\n");
+    printf("\n");
+    printf("policy program:\n");
+    printf("  policy upload <sha1-hex>    upload base64 staged policy text\n");
+    printf("  policy accept               accept staged policy as active\n");
+    return 0;
+}
+
+void register_console_command(const char *command,
+                              const char *help,
+                              esp_console_cmd_func_t func)
+{
+    esp_console_cmd_t definition = {};
+    definition.command = command;
+    definition.help = help;
+    definition.func = func;
+
+    ESP_ERROR_CHECK(esp_console_cmd_register(&definition));
+}
+
 void register_commands(void)
 {
-    esp_console_register_help_command();
-
-    esp_console_cmd_t status = {};
-    status.command = "status";
-    status.help = "Print a short controller status summary";
-    status.func = &status_command;
-
-    ESP_ERROR_CHECK(esp_console_cmd_register(&status));
-
-    esp_console_cmd_t set = {};
-    set.command = "set";
-    set.help = "Set a named boolean config flag";
-    set.func = &set_command;
-
-    ESP_ERROR_CHECK(esp_console_cmd_register(&set));
-
-    esp_console_cmd_t unset = {};
-    unset.command = "unset";
-    unset.help = "Clear a named boolean config flag";
-    unset.func = &unset_command;
-
-    ESP_ERROR_CHECK(esp_console_cmd_register(&unset));
-
-    esp_console_cmd_t system = {};
-    system.command = "system";
-    system.help = "Print system, heap, and task diagnostics";
-    system.func = &system_command;
-
-    ESP_ERROR_CHECK(esp_console_cmd_register(&system));
-
-    esp_console_cmd_t show = {};
-    show.command = "show";
-    show.help = "Show observed controller state";
-    show.func = &show_command;
-
-    ESP_ERROR_CHECK(esp_console_cmd_register(&show));
-
-    esp_console_cmd_t bank = {};
-    bank.command = "bank";
-    bank.help = "Configure and inspect battery banks";
-    bank.func = &bank_command;
-
-    ESP_ERROR_CHECK(esp_console_cmd_register(&bank));
-
-    esp_console_cmd_t relay = {};
-    relay.command = "relay";
-    relay.help = "Control and inspect relay timers and overrides";
-    relay.func = &relay_command;
-
-    ESP_ERROR_CHECK(esp_console_cmd_register(&relay));
-
-    esp_console_cmd_t config = {};
-    config.command = "config";
-    config.help = "Inspect and accept policy configuration";
-    config.func = &config_command;
-
-    ESP_ERROR_CHECK(esp_console_cmd_register(&config));
-
-    esp_console_cmd_t debug = {};
-    debug.command = "debug";
-    debug.help = "Control runtime debug logging";
-    debug.func = &debug_command;
-
-    ESP_ERROR_CHECK(esp_console_cmd_register(&debug));
+    register_console_command("help", "Show command summary", &power4_help_command);
+    register_console_command("show", "Show observed controller state", &show_command);
+    register_console_command("set", "Set volatile controller state", &set_command);
+    register_console_command("define", "Define persistent controller state", &define_command);
+    register_console_command("remove", "Remove persistent controller state", &remove_command);
+    register_console_command("report", "Print framed JSON state reports", &report_command);
+    register_console_command("policy", "Upload and accept policy programs", &policy_command);
 }
 
 esp_err_t create_repl(esp_console_repl_t **repl)

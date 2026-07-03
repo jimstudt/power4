@@ -153,44 +153,64 @@ Available starter commands:
 
 ```text
 help
-status
-system
-set
-unset
 show
-bank
-relay
-debug
+set
+define
+remove
+report
+policy
 ```
 
-Relay command examples:
+Show command examples:
 
 ```text
-relay list
-relay query 1
-relay state
-relay on 1 30
-relay force-on 1
-relay clear-force 1
+show system
+show relays
+show batteries
+show banks
+show policy
+show policy staged
+show policy-flags
+show debug
 ```
 
-Mode/config flag examples:
+Report command examples:
 
 ```text
-set generator_ok
-unset generator_ok
-status
+report relays
+report batteries
+report banks
 ```
 
-Set names are stored as boolean flags in the `config` NVS namespace. Names are
-limited to 1-15 characters: letters, digits, underscore, and hyphen.
-
-Debug command examples:
+Reports are printed as a tag, byte count, SHA-1 hash, and JSON payload:
 
 ```text
-debug ble_scanner on
-debug ble_scanner off
+P4J1 <json-bytes> <sha1-hex> <json>
 ```
+
+Volatile setting examples:
+
+```text
+set debug ble_scanner on
+set debug ble_scanner off
+set relay 1 on 30
+set relay 1 force-on
+set relay 1 clear-force
+```
+
+Persistent definition examples:
+
+```text
+define policy generator_ok=true
+define policy generator_ok=false
+remove policy generator_ok
+define bank house pack_a pack_b
+show banks
+remove bank house
+```
+
+Policy names are stored as boolean flags in the `config` NVS namespace. Names
+are limited to 1-15 characters: letters, digits, underscore, and hyphen.
 
 BLE scanner debug logging defaults to off. Turning it on prints advertisement
 details, scan summaries, raw JBD basic-info packets, and decoded battery packet
@@ -200,6 +220,7 @@ Battery observation examples:
 
 ```text
 show batteries
+report batteries
 ```
 
 Battery observations are kept in memory by name. Each record contains voltage,
@@ -210,9 +231,10 @@ packets.
 Battery bank examples:
 
 ```text
-bank create house pack_a pack_b
-bank show
-bank remove house
+define bank house pack_a pack_b
+show banks
+report banks
+remove bank house
 ```
 
 Battery banks are stored persistently in the `config` NVS namespace. A bank has
@@ -238,16 +260,16 @@ ready, volts, amps, soc = battery_bank_state("house")
 names = battery_bank_names()
 ```
 
-Configuration command examples:
+Policy program command examples:
 
 ```text
-config show
-config show staged
-config upload staged <sha1-hex>
-config accept staged
+show policy
+show policy staged
+policy upload <sha1-hex>
+policy accept
 ```
 
-`config upload staged` reads base64-encoded policy text from the console until a
+`policy upload` reads base64-encoded policy text from the console until a
 blank line or a line containing a non-base64 character. The checksum is SHA-1 of
 the decoded policy bytes, written as hexadecimal. The staged NVS key is updated
 only after the decoded bytes match the requested checksum.
@@ -257,7 +279,7 @@ On a Raspberry Pi, one way to compute the checksum and prepare the upload is:
 ```sh
 POLICY=policy.lua
 SHA1=$(sha1sum "$POLICY" | awk '{print $1}')
-printf 'config upload staged %s\n' "$SHA1"
+printf 'policy upload %s\n' "$SHA1"
 base64 "$POLICY"
 printf '\n'
 ```
@@ -265,8 +287,8 @@ printf '\n'
 Paste or send that output to the controller console. After upload:
 
 ```text
-config show staged
-config accept staged
+show policy staged
+policy accept
 ```
 
 JSON-producing commands print a framed line with the JSON length and SHA-1:
