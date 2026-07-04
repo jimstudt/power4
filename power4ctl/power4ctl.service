@@ -10,7 +10,7 @@ Environment="INTERVAL=60"
 Environment="LOCK_TIMEOUT=5"
 Environment="OUTDIR=/run/power4"
 EnvironmentFile=-/etc/default/power4ctl
-ExecStart=/usr/local/bin/power4ctl -D -p ${PORT} -b ${BAUD} -t ${TIMEOUT} -i ${INTERVAL} -l ${LOCK_TIMEOUT} -o ${OUTDIR}
+ExecStart=/usr/bin/power4ctl -D -p ${PORT} -b ${BAUD} -t ${TIMEOUT} -i ${INTERVAL} -l ${LOCK_TIMEOUT} -o ${OUTDIR}
 Restart=on-failure
 RestartSec=5
 RuntimeDirectory=power4

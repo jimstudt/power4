@@ -9,6 +9,9 @@ MANDIR      = /usr/local/share/man/man1
 SYSTEMDDIR  = /usr/lib/systemd/system
 DEFAULTSDIR = /etc/default
 
+DEB_BINDIR  = /usr/bin
+DEB_MANDIR  = /usr/share/man/man1
+
 ARCH    := $(shell dpkg --print-architecture 2>/dev/null || \
                uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')
 PKGROOT  = pkgroot
@@ -38,12 +41,12 @@ uninstall:
 deb: $(TARGET)
 	rm -rf $(PKGROOT)
 	install -d $(PKGROOT)/DEBIAN \
-	           $(PKGROOT)/$(BINDIR) \
-	           $(PKGROOT)/$(MANDIR) \
+	           $(PKGROOT)/$(DEB_BINDIR) \
+	           $(PKGROOT)/$(DEB_MANDIR) \
 	           $(PKGROOT)/$(SYSTEMDDIR) \
 	           $(PKGROOT)/$(DEFAULTSDIR)
-	install -m 755 $(TARGET) $(PKGROOT)/$(BINDIR)/$(TARGET)
-	gzip -c $(TARGET).1 > $(PKGROOT)/$(MANDIR)/$(TARGET).1.gz
+	install -m 755 $(TARGET) $(PKGROOT)/$(DEB_BINDIR)/$(TARGET)
+	gzip -c $(TARGET).1 > $(PKGROOT)/$(DEB_MANDIR)/$(TARGET).1.gz
 	install -m 644 $(TARGET).service $(PKGROOT)/$(SYSTEMDDIR)/$(TARGET).service
 	install -m 644 $(TARGET).default $(PKGROOT)/$(DEFAULTSDIR)/$(TARGET)
 	sed -e 's/@VERSION@/$(VERSION)/g' \
