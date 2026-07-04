@@ -12,6 +12,22 @@ power4ctl \- serial management tool for the power4 ESP32 device
 .RB [ \-v ]
 .I command
 .RI [ args... ]
+.PP
+.B power4ctl
+.RB [ \-p
+.IR port ]
+.RB [ \-b
+.IR baud ]
+.RB [ \-t
+.IR seconds ]
+.RB [ \-v ]
+.B \-D
+.RB [ \-i
+.IR interval ]
+.RB [ \-l
+.IR lock\-seconds ]
+.RB [ \-o
+.IR outdir ]
 .SH DESCRIPTION
 .B power4ctl
 communicates with a power4 ESP32 device over its serial console.
@@ -38,6 +54,21 @@ Any command not listed below is sent verbatim to the device and all
 output lines are echoed to standard output until the
 .B power4>
 prompt returns.
+.PP
+In daemon mode
+.RB ( \-D ),
+.B power4ctl
+runs indefinitely, opening the serial port at each interval, collecting
+the three JSON reports
+.RB ( batteries ,
+.BR banks ,
+.BR relays ),
+writing them atomically to the output directory, then closing the port
+and sleeping until the next interval.
+Each file is written to a hidden temporary name and then renamed into
+place so readers never see a partial file.
+If the port cannot be locked within the lock-wait timeout the cycle is
+skipped and the existing files are left unchanged.
 .SH OPTIONS
 .TP
 .BI \-p " port"
@@ -51,7 +82,8 @@ Default:
 .IR 115200 .
 .TP
 .BI \-t " seconds"
-Total timeout for the operation.
+Per-operation timeout: how long to wait for the prompt and for each
+command response.
 Default:
 .IR 2 .
 .TP
@@ -67,6 +99,35 @@ to standard error, with non-printable characters shown as
 .BR \et ,
 or
 .BR \exNN .
+.TP
+.B \-D
+Daemon mode.
+Run forever, collecting all three JSON reports on a periodic loop.
+Takes no command arguments.
+Terminated cleanly by
+.B SIGTERM
+or
+.BR SIGINT .
+.TP
+.BI \-i " seconds"
+Daemon poll interval in seconds.
+Default:
+.IR 60 .
+.TP
+.BI \-l " seconds"
+How long to wait for the serial port lock before skipping a daemon cycle.
+Default:
+.IR 5 .
+.TP
+.BI \-o " dir"
+Directory where daemon mode writes
+.IR batteries.json ,
+.IR banks.json ,
+and
+.I relays.json
+(created if it does not exist).
+Default:
+.IR /run/power4 .
 .SH COMMANDS
 .TP
 .B json batteries
@@ -99,10 +160,28 @@ echoed to standard output until the
 prompt returns.
 This provides full access to the device's console without a separate
 terminal emulator.
+.SH DAEMON OUTPUT FILES
+In daemon mode, three files are maintained under the output directory
+(default
+.IR /run/power4 ):
+.TP
+.I batteries.json
+Current battery observations.
+.TP
+.I banks.json
+Current battery bank state.
+.TP
+.I relays.json
+Current relay state.
+.PP
+Each file is written atomically: new content is first written to
+.RI .tmp. name .json
+in the same directory, then renamed into place.
+If a cycle fails (port busy, timeout), the previous files are not modified.
 .SH EXIT STATUS
 .TP
 .B 0
-The command completed successfully.
+The command completed successfully (or daemon mode was terminated by signal).
 .TP
 .B 1
 An error occurred (device busy, timeout, checksum mismatch, upload
@@ -112,6 +191,9 @@ A message is printed to standard error.
 .TP
 .I /dev/ttyACM0
 Default serial port (USB CDC ACM, used by the ESP32 USB-JTAG/Serial interface).
+.TP
+.I /run/power4/
+Default daemon output directory.
 .SH LOCKING
 .B power4ctl
 calls
@@ -121,8 +203,11 @@ with
 and sets
 .B TIOCEXCL
 on the port immediately after opening it.
-If another process already holds the port, the tool exits immediately
-with an error rather than waiting.
+In single-shot mode, if another process already holds the port the tool
+exits immediately with an error rather than waiting.
+In daemon mode, the lock attempt is retried every 500\ ms for up to
+.I lock\-seconds
+seconds (default\ 5) before the cycle is skipped.
 .SH NOTES
 The port is configured in raw 8N1 mode with the requested baud rate and
 no hardware flow control.

@@ -1,0 +1,24 @@
+# Configuration for power4ctl daemon (/usr/local/bin/power4ctl -D)
+# See power4ctl(1) for details on each option.
+# Uncomment and edit a line to override the compiled-in default.
+
+# Serial port connected to the power4 ESP32 device.
+#PORT=/dev/ttyACM0
+
+# Baud rate.  For USB CDC ACM devices this is advisory.
+#BAUD=115200
+
+# Per-operation timeout in seconds (prompt elicit + command response).
+#TIMEOUT=2
+
+# How often to poll the device, in seconds.
+#INTERVAL=60
+
+# Seconds to wait for the serial port lock before skipping a cycle.
+# Raise this if transient picocom sessions cause missed updates.
+#LOCK_TIMEOUT=5
+
+# Directory where batteries.json, banks.json, and relays.json are written.
+# The directory is created by systemd (RuntimeDirectory) and this default
+# should only be changed if the service unit is also updated.
+#OUTDIR=/run/power4

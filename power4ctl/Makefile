@@ -4,8 +4,10 @@ TARGET   = power4ctl
 VERSION  = 1.0.0
 OBJS     = power4ctl.o sha1.o
 
-BINDIR   = /usr/local/bin
-MANDIR   = /usr/local/share/man/man1
+BINDIR      = /usr/local/bin
+MANDIR      = /usr/local/share/man/man1
+SYSTEMDDIR  = /usr/lib/systemd/system
+DEFAULTSDIR = /etc/default
 
 ARCH    := $(shell dpkg --print-architecture 2>/dev/null || \
                uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')
@@ -37,12 +39,19 @@ deb: $(TARGET)
 	rm -rf $(PKGROOT)
 	install -d $(PKGROOT)/DEBIAN \
 	           $(PKGROOT)/$(BINDIR) \
-	           $(PKGROOT)/$(MANDIR)
+	           $(PKGROOT)/$(MANDIR) \
+	           $(PKGROOT)/$(SYSTEMDDIR) \
+	           $(PKGROOT)/$(DEFAULTSDIR)
 	install -m 755 $(TARGET) $(PKGROOT)/$(BINDIR)/$(TARGET)
 	gzip -c $(TARGET).1 > $(PKGROOT)/$(MANDIR)/$(TARGET).1.gz
+	install -m 644 $(TARGET).service $(PKGROOT)/$(SYSTEMDDIR)/$(TARGET).service
+	install -m 644 $(TARGET).default $(PKGROOT)/$(DEFAULTSDIR)/$(TARGET)
 	sed -e 's/@VERSION@/$(VERSION)/g' \
 	    -e 's/@ARCH@/$(ARCH)/g' \
 	    debian/control.in > $(PKGROOT)/DEBIAN/control
+	install -m 755 debian/postinst $(PKGROOT)/DEBIAN/postinst
+	install -m 755 debian/prerm    $(PKGROOT)/DEBIAN/prerm
+	cp debian/conffiles            $(PKGROOT)/DEBIAN/conffiles
 	dpkg-deb --build --root-owner-group $(PKGROOT) $(PKGFILE)
 	rm -rf $(PKGROOT)
 

@@ -1,0 +1,14 @@
+#!/bin/sh
+set -e
+
+case "$1" in
+    configure)
+        if [ -d /run/systemd/system ]; then
+            systemctl daemon-reload || true
+            systemctl enable power4ctl.service || true
+            systemctl start power4ctl.service || true
+        fi
+        ;;
+esac
+
+exit 0

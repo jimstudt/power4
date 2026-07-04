@@ -3,28 +3,12 @@
 `power4` is firmware for a Waveshare ESP32-S3-Relay-6CH used as a configurable
 power controller. The controller is intended to run unattended for years while
 making relay decisions from battery state data and a site-specific policy.
+It monitors battery state by scanning for JBD BMS advertisements over BLE and
+uses that data as input to a Lua policy program that drives the relay outputs.
 
-The initial hardware plan is:
-
-- Waveshare ESP32-S3-Relay-6CH as the relay controller.
-- Battery management systems reporting battery state over BLE.
-- A Raspberry Pi connected to the ESP32-S3 USB port for console access,
-  configuration transfer, monitoring, and future maintenance tooling.
-- Relay outputs assigned to equipment such as generators, DC/DC transfer
-  systems, and ancillary loads.
-
-This repository is starting from the system shape above, but the implementation
-details are expected to evolve as the operational constraints become clearer.
-
-## Goals
-
-- Run unattended for years with predictable behavior.
-- Keep the firmware simple, inspectable, and easy to reason about.
-- Prefer explicit state machines, clear ownership, and small modules.
-- Make configuration and operating mode changes possible through a console
-  interface over USB serial.
-- Support safe configuration updates from the Raspberry Pi.
-- Keep the top-level developer interface behind `make`.
+Also included is `power4ctl` which is a control program for a computer attached
+to the USB port of the Waveshare.  It can query, control, and configure the unit.
+It also can run as a daemon to keep JSON files of the current conditions.
 
 ## Make Targets
 
@@ -40,6 +24,7 @@ make monitor      # open ESP-IDF serial monitor
 make menuconfig   # open ESP-IDF configuration UI
 make clean        # remove build outputs
 make power4ctl    # build the host management tool
+make deb          # build Debian package for power4ctl
 ```
 
 The project target defaults to `esp32s3`. Activate ESP-IDF before running
@@ -394,12 +379,17 @@ sudo dpkg -i power4ctl/power4ctl_1.0.0_arm64.deb
 
 ```text
 power4ctl [-p port] [-b baud] [-t seconds] [-v] command [args...]
+power4ctl [-p port] [-b baud] [-t seconds] [-v] -D [-i interval] [-l lock-seconds] [-o outdir]
 
 Options:
-  -p port      serial port  (default: /dev/ttyACM0)
-  -b baud      baud rate    (default: 115200)
-  -t seconds   timeout      (default: 2)
-  -v           verbose: log bytes sent/received to stderr
+  -p port          serial port  (default: /dev/ttyACM0)
+  -b baud          baud rate    (default: 115200)
+  -t seconds       timeout per operation  (default: 2)
+  -v               verbose: log bytes sent/received to stderr
+  -D               daemon mode: collect JSON reports on a loop
+  -i seconds       daemon poll interval  (default: 60)
+  -l seconds       port lock wait timeout  (default: 5)
+  -o dir           daemon output directory  (default: /run/power4)
 ```
 
 ### Commands
@@ -433,11 +423,25 @@ power4ctl policy accept
 power4ctl help
 ```
 
+**Daemon mode** — run indefinitely, polling the device every 60 seconds and
+writing `batteries.json`, `banks.json`, and `relays.json` to `/run/power4/`.
+Files are written atomically via a `.tmp.` rename so readers never see partial
+content. If the port is held by another process the cycle is skipped (up to
+5 s lock-wait) and the previous files are left untouched. Terminated by
+`SIGTERM` or `SIGINT`:
+
+```sh
+power4ctl -D
+power4ctl -D -i 30 -l 10 -o /var/lib/power4
+```
+
 ### Locking
 
 `power4ctl` uses `flock(LOCK_EX|LOCK_NB)` and `TIOCEXCL` immediately after
-opening the port. If another process already holds the port (including a
-`picocom` session), the tool exits immediately with an error.
+opening the port. In single-shot mode, if another process already holds the
+port the tool exits immediately with an error. In daemon mode the lock attempt
+is retried every 500 ms for up to the lock-wait timeout before the cycle is
+skipped.
 
 ## Repository Status
 

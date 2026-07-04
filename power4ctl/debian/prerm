@@ -1,0 +1,13 @@
+#!/bin/sh
+set -e
+
+case "$1" in
+    remove|upgrade|deconfigure)
+        if [ -d /run/systemd/system ]; then
+            systemctl stop power4ctl.service || true
+            systemctl disable power4ctl.service || true
+        fi
+        ;;
+esac
+
+exit 0
