@@ -173,6 +173,7 @@ define
 remove
 report
 policy
+reboot
 ```
 
 Show command examples:
@@ -180,6 +181,7 @@ Show command examples:
 ```text
 show system
 show relays
+show ble
 show batteries
 show banks
 show policy
@@ -200,6 +202,12 @@ Reports are printed as a tag, byte count, SHA-1 hash, and JSON payload:
 
 ```text
 P4J1 <json-bytes> <sha1-hex> <json>
+```
+
+System command examples:
+
+```text
+reboot
 ```
 
 Volatile setting examples:

@@ -8,6 +8,7 @@
 
 #include "battery_store.hpp"
 #include "ble_manager.hpp"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
@@ -36,6 +37,8 @@ constexpr uint32_t kScanDurationMs = CONFIG_POWER4_BATTERY_SCAN_DURATION_SECONDS
 constexpr size_t kSeenDevicesMax = 32;
 constexpr size_t kJbdRxBufferSize = 128;
 constexpr TickType_t kInterrogationTimeoutTicks = pdMS_TO_TICKS(5000);
+constexpr TickType_t kConnectProcedureTimeoutTicks = pdMS_TO_TICKS(7000);
+constexpr TickType_t kDisconnectTimeoutTicks = pdMS_TO_TICKS(5000);
 constexpr TickType_t kJbdCommandRetryTicks = pdMS_TO_TICKS(250);
 
 constexpr EventBits_t kScanDoneBit = BIT0;
@@ -492,6 +495,32 @@ bool copy_trimmed_adv_name(const uint8_t *name, uint8_t name_len, char *out, siz
     return battery_store_valid_name(out);
 }
 
+const char *ble_hs_rc_name(int rc)
+{
+    switch (rc) {
+    case BLE_HS_EAGAIN:
+        return "EAGAIN";
+    case BLE_HS_EALREADY:
+        return "EALREADY";
+    case BLE_HS_EINVAL:
+        return "EINVAL";
+    case BLE_HS_EMSGSIZE:
+        return "EMSGSIZE";
+    case BLE_HS_ENOENT:
+        return "ENOENT";
+    case BLE_HS_ENOMEM:
+        return "ENOMEM";
+    case BLE_HS_ENOTCONN:
+        return "ENOTCONN";
+    case BLE_HS_EBUSY:
+        return "EBUSY";
+    case BLE_HS_ENOTSYNCED:
+        return "ENOTSYNCED";
+    default:
+        return "unknown";
+    }
+}
+
 bool mark_seen_report(const ble_addr_t &addr, uint8_t event_type)
 {
     for (size_t i = 0; i < g_seen_report_count; ++i) {
@@ -844,24 +873,78 @@ bool wait_for_probe_bits(EventBits_t bits, TickType_t timeout)
     return (result & bits) != 0;
 }
 
-void disconnect_probe(void)
+void wait_for_connect_cancel(const char *addr)
+{
+    const EventBits_t result = xEventGroupWaitBits(g_scanner_events,
+                                                   kProbeConnectedBit | kProbeFailedBit |
+                                                       kProbeDisconnectedBit,
+                                                   pdTRUE,
+                                                   pdFALSE,
+                                                   kDisconnectTimeoutTicks);
+    if ((result & kProbeConnectedBit) != 0) {
+        ESP_LOGW(kTag, "JBD connection completed after cancel request: addr=%s", addr);
+        return;
+    }
+    if ((result & (kProbeFailedBit | kProbeDisconnectedBit)) == 0) {
+        ESP_LOGW(kTag, "timed out waiting for JBD connect cancel: addr=%s", addr);
+    }
+}
+
+void cancel_pending_probe_connect(const char *addr)
+{
+    if (!ble_gap_conn_active()) {
+        return;
+    }
+
+    const int rc = ble_gap_conn_cancel();
+    if (rc != 0 && rc != BLE_HS_EALREADY) {
+        ESP_LOGW(kTag,
+                 "failed to cancel JBD battery connection attempt: addr=%s rc=%d(%s)",
+                 addr,
+                 rc,
+                 ble_hs_rc_name(rc));
+        return;
+    }
+
+    wait_for_connect_cancel(addr);
+}
+
+void disconnect_probe(const char *addr)
 {
     if (g_probe.conn_handle == BLE_HS_CONN_HANDLE_NONE) {
+        cancel_pending_probe_connect(addr);
+        if (g_probe.conn_handle != BLE_HS_CONN_HANDLE_NONE) {
+            disconnect_probe(addr);
+        }
         return;
     }
 
-    const int rc = ble_gap_terminate(g_probe.conn_handle, BLE_ERR_REM_USER_CONN_TERM);
+    const uint16_t conn_handle = g_probe.conn_handle;
+    const int rc = ble_gap_terminate(conn_handle, BLE_ERR_REM_USER_CONN_TERM);
     if (rc != 0) {
-        ESP_LOGW(kTag, "failed to disconnect from battery: rc=%d", rc);
-        g_probe.conn_handle = BLE_HS_CONN_HANDLE_NONE;
+        ESP_LOGW(kTag,
+                 "failed to disconnect from battery: addr=%s handle=%u rc=%d(%s)",
+                 addr,
+                 static_cast<unsigned>(conn_handle),
+                 rc,
+                 ble_hs_rc_name(rc));
+        if (rc == BLE_HS_ENOTCONN) {
+            g_probe.conn_handle = BLE_HS_CONN_HANDLE_NONE;
+        }
         return;
     }
 
-    (void)xEventGroupWaitBits(g_scanner_events,
-                              kProbeDisconnectedBit,
-                              pdTRUE,
-                              pdFALSE,
-                              pdMS_TO_TICKS(2000));
+    const EventBits_t bits = xEventGroupWaitBits(g_scanner_events,
+                                                 kProbeDisconnectedBit,
+                                                 pdTRUE,
+                                                 pdFALSE,
+                                                 kDisconnectTimeoutTicks);
+    if ((bits & kProbeDisconnectedBit) == 0) {
+        ESP_LOGW(kTag,
+                 "timed out waiting for JBD battery disconnect: addr=%s handle=%u",
+                 addr,
+                 static_cast<unsigned>(conn_handle));
+    }
 }
 
 bool discover_probe_handles(void)
@@ -1026,25 +1109,36 @@ void probe_battery(const BatteryCandidate &candidate)
                              probe_gap_event,
                              nullptr);
     if (rc != 0) {
-        ESP_LOGW(kTag, "failed to start JBD battery connection: addr=%s rc=%d", addr, rc);
+        ESP_LOGW(kTag,
+                 "failed to start JBD battery connection: addr=%s rc=%d(%s) heap_free=%u "
+                 "heap_largest=%u internal_free=%u internal_largest=%u",
+                 addr,
+                 rc,
+                 ble_hs_rc_name(rc),
+                 static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_8BIT)),
+                 static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)),
+                 static_cast<unsigned>(
+                     heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)),
+                 static_cast<unsigned>(
+                     heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)));
         return;
     }
 
-    if (!wait_for_probe_bits(kProbeConnectedBit, kInterrogationTimeoutTicks)) {
+    if (!wait_for_probe_bits(kProbeConnectedBit, kConnectProcedureTimeoutTicks)) {
         ESP_LOGW(kTag, "JBD battery connection timed out: addr=%s status=%d", addr, g_probe.status);
-        disconnect_probe();
+        disconnect_probe(addr);
         return;
     }
 
     if (!discover_probe_handles() || !subscribe_probe_notifications() || !send_basic_info_request()) {
-        disconnect_probe();
+        disconnect_probe(addr);
         return;
     }
 
     bool got_packet = wait_for_probe_bits(kProbePacketDoneBit, kJbdCommandRetryTicks);
     if (!got_packet) {
         if (!send_basic_info_request()) {
-            disconnect_probe();
+            disconnect_probe(addr);
             return;
         }
         got_packet = wait_for_probe_bits(kProbePacketDoneBit, kInterrogationTimeoutTicks);
@@ -1061,7 +1155,7 @@ void probe_battery(const BatteryCandidate &candidate)
         ESP_LOGW(kTag, "no valid JBD basic info packet before timeout: addr=%s", addr);
     }
 
-    disconnect_probe();
+    disconnect_probe(addr);
 }
 
 int scan_event(ble_gap_event *event, void *arg)

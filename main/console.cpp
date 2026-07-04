@@ -44,6 +44,13 @@
 #include "mbedtls/base64.h"
 #include "sdkconfig.h"
 
+extern "C" {
+#include "host/ble_gap.h"
+#include "host/ble_hs.h"
+
+void ble_gap_conn_foreach_handle(ble_gap_conn_foreach_handle_fn *cb, void *arg);
+}
+
 namespace {
 
 constexpr const char *kTag = "power4_console";
@@ -68,8 +75,10 @@ bool g_console_prompt_active = false;
 vprintf_like_t g_previous_log_vprintf = nullptr;
 
 int bank_show_command(void);
+int ble_show_command(void);
 int print_policy_slot(PolicySlot slot);
 int system_command(int argc, char **argv);
+int reboot_command(int argc, char **argv);
 
 enum class EscapeState : uint8_t {
     None,
@@ -302,6 +311,7 @@ void print_show_usage(void)
     printf("usage:\n");
     printf("  show batteries\n");
     printf("  show banks\n");
+    printf("  show ble\n");
     printf("  show debug\n");
     printf("  show policy\n");
     printf("  show policy-flags\n");
@@ -397,6 +407,14 @@ int show_command(int argc, char **argv)
         return bank_show_command();
     }
 
+    if (strcmp(argv[1], "ble") == 0) {
+        if (argc != 2) {
+            print_show_usage();
+            return 1;
+        }
+        return ble_show_command();
+    }
+
     if (strcmp(argv[1], "debug") == 0) {
         if (argc != 2) {
             print_show_usage();
@@ -443,6 +461,117 @@ int show_command(int argc, char **argv)
 
     print_show_usage();
     return 1;
+}
+
+void format_ble_addr(const ble_addr_t &addr, char *buffer, size_t buffer_size)
+{
+    if (buffer == nullptr || buffer_size == 0) {
+        return;
+    }
+
+    snprintf(buffer,
+             buffer_size,
+             "%02x:%02x:%02x:%02x:%02x:%02x",
+             addr.val[5],
+             addr.val[4],
+             addr.val[3],
+             addr.val[2],
+             addr.val[1],
+             addr.val[0]);
+}
+
+const char *ble_addr_type_name(uint8_t type)
+{
+    switch (type) {
+    case BLE_ADDR_PUBLIC:
+        return "public";
+    case BLE_ADDR_RANDOM:
+        return "random";
+    case BLE_ADDR_PUBLIC_ID:
+        return "public-id";
+    case BLE_ADDR_RANDOM_ID:
+        return "random-id";
+    default:
+        return "unknown";
+    }
+}
+
+const char *ble_role_name(uint8_t role)
+{
+    switch (role) {
+    case BLE_GAP_ROLE_MASTER:
+        return "master";
+    case BLE_GAP_ROLE_SLAVE:
+        return "slave";
+    default:
+        return "unknown";
+    }
+}
+
+struct BleConnectionList {
+    uint16_t handles[CONFIG_BT_NIMBLE_MAX_CONNECTIONS] = {};
+    size_t count = 0;
+    bool truncated = false;
+};
+
+int collect_ble_connection_handle(uint16_t conn_handle, void *arg)
+{
+    BleConnectionList *connections = static_cast<BleConnectionList *>(arg);
+    if (connections == nullptr) {
+        return 0;
+    }
+
+    if (connections->count >= CONFIG_BT_NIMBLE_MAX_CONNECTIONS) {
+        connections->truncated = true;
+        return 0;
+    }
+
+    connections->handles[connections->count] = conn_handle;
+    ++connections->count;
+    return 0;
+}
+
+int ble_show_command(void)
+{
+    BleConnectionList connections = {};
+    ble_gap_conn_foreach_handle(collect_ble_connection_handle, &connections);
+
+    printf("ble:\n");
+    printf("  connections=%u/%u%s\n",
+           static_cast<unsigned>(connections.count),
+           static_cast<unsigned>(CONFIG_BT_NIMBLE_MAX_CONNECTIONS),
+           connections.truncated ? " (truncated)" : "");
+    printf("  advertising=%s\n", ble_gap_adv_active() ? "active" : "idle");
+    printf("  scanning=%s\n", ble_gap_disc_active() ? "active" : "idle");
+    printf("  connecting=%s\n", ble_gap_conn_active() ? "active" : "idle");
+
+    for (size_t i = 0; i < connections.count; ++i) {
+        ble_gap_conn_desc desc = {};
+        const int rc = ble_gap_conn_find(connections.handles[i], &desc);
+        if (rc != 0) {
+            printf("  handle=%u state=error:%d\n",
+                   static_cast<unsigned>(connections.handles[i]),
+                   rc);
+            continue;
+        }
+
+        char peer_ota[18] = {};
+        char peer_id[18] = {};
+        format_ble_addr(desc.peer_ota_addr, peer_ota, sizeof(peer_ota));
+        format_ble_addr(desc.peer_id_addr, peer_id, sizeof(peer_id));
+        printf("  handle=%u role=%s peer_ota=%s(%s) peer_id=%s(%s) interval=%u latency=%u timeout=%u\n",
+               static_cast<unsigned>(desc.conn_handle),
+               ble_role_name(desc.role),
+               peer_ota,
+               ble_addr_type_name(desc.peer_ota_addr.type),
+               peer_id,
+               ble_addr_type_name(desc.peer_id_addr.type),
+               static_cast<unsigned>(desc.conn_itvl),
+               static_cast<unsigned>(desc.conn_latency),
+               static_cast<unsigned>(desc.supervision_timeout));
+    }
+
+    return 0;
 }
 
 int bank_show_command(void)
@@ -1428,6 +1557,7 @@ int power4_help_command(int argc, char **argv)
     printf("show:\n");
     printf("  show batteries              list observed batteries\n");
     printf("  show banks                  list configured battery banks\n");
+    printf("  show ble                    list BLE GAP procedure and connection state\n");
     printf("  show debug                  show volatile debug settings\n");
     printf("  show policy                 print the active policy program\n");
     printf("  show policy staged          print the staged policy program\n");
@@ -1456,6 +1586,24 @@ int power4_help_command(int argc, char **argv)
     printf("policy program:\n");
     printf("  policy upload <sha1-hex>    upload base64 staged policy text\n");
     printf("  policy accept               accept staged policy as active\n");
+    printf("\n");
+    printf("system:\n");
+    printf("  reboot                      restart the controller\n");
+    return 0;
+}
+
+int reboot_command(int argc, char **argv)
+{
+    if (argc != 1) {
+        printf("usage:\n");
+        printf("  reboot\n");
+        return 1;
+    }
+
+    printf("rebooting\n");
+    fflush(stdout);
+    vTaskDelay(pdMS_TO_TICKS(100));
+    esp_restart();
     return 0;
 }
 
@@ -1480,6 +1628,7 @@ void register_commands(void)
     register_console_command("remove", "Remove persistent controller state", &remove_command);
     register_console_command("report", "Print framed JSON state reports", &report_command);
     register_console_command("policy", "Upload and accept policy programs", &policy_command);
+    register_console_command("reboot", "Restart the controller", &reboot_command);
 }
 
 esp_err_t setup_console_device(void)
