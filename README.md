@@ -398,7 +398,7 @@ A Debian package for the current architecture can be built and installed with:
 
 ```sh
 make -C power4ctl deb
-sudo dpkg -i power4ctl/power4ctl_1.0.0_arm64.deb
+sudo dpkg -i power4ctl/power4ctl_1.0.1_arm64.deb
 ```
 
 ### Usage
