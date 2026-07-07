@@ -118,7 +118,7 @@ int write_flag(ble_gatt_access_ctxt *ctxt, bool set_flag)
         return result;
     }
 
-    const esp_err_t err = set_flag ? config_flags_set(name) : config_flags_unset(name);
+    const esp_err_t err = set_flag ? config_flags_set(name, 0) : config_flags_unset(name);
     if (err != ESP_OK) {
         ESP_LOGW(kTag,
                  "failed to %s config flag '%s' for GATT client: %s",

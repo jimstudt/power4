@@ -297,7 +297,14 @@ int print_config_flags(void)
         printf(" none");
     }
     for (size_t i = 0; i < flags.count; ++i) {
-        printf(" %s", flags.names[i]);
+        if (flags.lifetime_s[i] > 0) {
+            printf(" %s(%u/%us)",
+                   flags.names[i],
+                   static_cast<unsigned>(flags.remaining_s[i]),
+                   static_cast<unsigned>(flags.lifetime_s[i]));
+        } else {
+            printf(" %s", flags.names[i]);
+        }
     }
     if (flags.truncated) {
         printf(" ...");
@@ -640,6 +647,25 @@ bool parse_on_off(const char *text, bool *value)
     return false;
 }
 
+bool parse_lifetime(const char *text, uint32_t *seconds)
+{
+    if (text == nullptr || seconds == nullptr || text[0] == '\0') {
+        return false;
+    }
+
+    char stripped[16] = {};
+    const size_t length = strlen(text);
+    if (length >= sizeof(stripped)) {
+        return false;
+    }
+    strlcpy(stripped, text, sizeof(stripped));
+    if (stripped[length - 1] == 's') {
+        stripped[length - 1] = '\0';
+    }
+
+    return parse_u32(stripped, seconds) && *seconds > 0;
+}
+
 bool split_assignment(char *text, char **name, char **value)
 {
     if (text == nullptr || name == nullptr || value == nullptr) {
@@ -745,7 +771,7 @@ void print_define_usage(void)
 {
     printf("usage:\n");
     printf("  define bank <name> <battery> [battery...]\n");
-    printf("  define policy <name>=true\n");
+    printf("  define policy <name>=true [<seconds>s]\n");
     printf("  define policy <name>=false\n");
 }
 
@@ -790,19 +816,28 @@ int define_command(int argc, char **argv)
         char *name = nullptr;
         char *value_text = nullptr;
         bool value = false;
-        if (argc != 3 || !split_assignment(argv[2], &name, &value_text) ||
+        uint32_t lifetime_s = 0;
+        if ((argc != 3 && argc != 4) || !split_assignment(argv[2], &name, &value_text) ||
             !config_flags_valid_name(name) || !parse_on_off(value_text, &value)) {
             print_define_usage();
             return 1;
         }
+        if (argc == 4 && (!value || !parse_lifetime(argv[3], &lifetime_s))) {
+            print_define_usage();
+            return 1;
+        }
 
-        const esp_err_t err = value ? config_flags_set(name) : config_flags_unset(name);
+        const esp_err_t err = value ? config_flags_set(name, lifetime_s) : config_flags_unset(name);
         if (err != ESP_OK) {
             printf("define policy %s failed: %s\n", name, esp_err_to_name(err));
             return 1;
         }
 
-        printf("policy %s=%s\n", name, value ? "true" : "false");
+        if (lifetime_s > 0) {
+            printf("policy %s=true for %us\n", name, static_cast<unsigned>(lifetime_s));
+        } else {
+            printf("policy %s=%s\n", name, value ? "true" : "false");
+        }
         return 0;
     }
 
@@ -1580,7 +1615,7 @@ int power4_help_command(int argc, char **argv)
     printf("define/remove:\n");
     printf("  define bank <name> <battery> [battery...]\n");
     printf("  remove bank <name>\n");
-    printf("  define policy <name>=true|false\n");
+    printf("  define policy <name>=true|false [<seconds>s]\n");
     printf("  remove policy <name>\n");
     printf("\n");
     printf("policy program:\n");

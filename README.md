@@ -209,6 +209,7 @@ Persistent definition examples:
 
 ```text
 define policy generator_ok=true
+define policy generator_running=true 300s
 define policy generator_ok=false
 remove policy generator_ok
 define bank house pack_a pack_b
@@ -218,6 +219,13 @@ remove bank house
 
 Policy names are stored as boolean flags in the `config` NVS namespace. Names
 are limited to 1-15 characters: letters, digits, underscore, and hyphen.
+
+A flag may be given an optional lifetime in seconds. A lifetime flag acts as a
+dead-man switch: unless it is refreshed by another `define policy` within its
+lifetime, it is removed just before a policy cycle runs. Lifetimes are stored
+in the `policy_ttl` NVS namespace and the countdown restarts from the full
+lifetime after a reboot. `show policy-flags` reports lifetime flags as
+`name(remaining/authorized)`, for example `generator_running(287/300s)`.
 
 BLE scanner debug logging defaults to off. Turning it on prints advertisement
 details, scan summaries, raw JBD basic-info packets, and decoded battery packet

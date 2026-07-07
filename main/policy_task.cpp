@@ -267,6 +267,11 @@ bool run_lua_policy(const char *source, size_t length, const char *chunk_name, T
 
 void run_policy_cycle(TickType_t deadline)
 {
+    const esp_err_t expire_err = config_flags_expire();
+    if (expire_err != ESP_OK) {
+        ESP_LOGW(kTag, "policy flag expiry failed: %s", esp_err_to_name(expire_err));
+    }
+
     char *active_source = nullptr;
     size_t active_length = 0;
     esp_err_t err = policy_storage_read_alloc(PolicySlot::Active, &active_source, &active_length);
