@@ -427,6 +427,7 @@ to stdout:
 ```sh
 power4ctl json batteries
 power4ctl json banks
+power4ctl json logs
 power4ctl json relays
 ```
 
@@ -450,7 +451,8 @@ power4ctl help
 ```
 
 **Daemon mode** — run indefinitely, polling the device every 60 seconds and
-writing `batteries.json`, `banks.json`, and `relays.json` to `/run/power4/`.
+writing `batteries.json`, `banks.json`, `relays.json`, and `logs.json` to
+`/run/power4/`.
 Files are written atomically via a `.tmp.` rename so readers never see partial
 content. If the port is held by another process the cycle is skipped (up to
 5 s lock-wait) and the previous files are left untouched. Terminated by
@@ -469,11 +471,25 @@ port the tool exits immediately with an error. In daemon mode the lock attempt
 is retried every 500 ms for up to the lock-wait timeout before the cycle is
 skipped.
 
+## Example Policy
+
+`examples/shed.lua` is a complete site policy managing a 48v bank charged by
+a generator and a pair of paralleled 24v banks fed from the 48v bank through
+a DC/DC converter, with hysteresis, deadman holds, and manual override flags.
+`examples/shed_test.lua` runs it against scripted scenarios on a host with a
+stock Lua 5.4 interpreter:
+
+```sh
+lua5.4 examples/shed_test.lua examples/shed.lua
+```
+
 ## Repository Status
 
-This is an early project skeleton. BLE battery integration, policy safety
-behavior, and the actual site policy APIs still need to be designed and
-implemented.
+The firmware and `power4ctl` are in service running a real installation:
+BLE battery monitoring, battery banks, the Lua policy engine, policy flags
+with lifetimes, relay deadman holds, log capture, and JSON reporting are all
+functional. BLE access remains unauthenticated, and policy staging is
+console-only by design.
 
 ## License
 
