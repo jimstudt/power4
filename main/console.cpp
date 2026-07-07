@@ -16,6 +16,7 @@
 #include "config_flags.hpp"
 #include "json_output.hpp"
 #include "policy_storage.hpp"
+#include "policy_task.hpp"
 #include "relay_manager.hpp"
 #include "esp_app_desc.h"
 #include "esp_chip_info.h"
@@ -1393,7 +1394,24 @@ int policy_command(int argc, char **argv)
             return 1;
         }
 
-        const esp_err_t err = policy_storage_accept_staged();
+        char *staged = nullptr;
+        size_t staged_length = 0;
+        esp_err_t err = policy_storage_read_alloc(PolicySlot::Staged, &staged, &staged_length);
+        if (err != ESP_OK) {
+            printf("policy accept failed: %s\n", esp_err_to_name(err));
+            return 1;
+        }
+
+        char lua_error[192] = {};
+        err = policy_validate(staged, staged_length, lua_error, sizeof(lua_error));
+        free(staged);
+        if (err != ESP_OK) {
+            printf("policy accept rejected: %s\n",
+                   lua_error[0] != '\0' ? lua_error : esp_err_to_name(err));
+            return 1;
+        }
+
+        err = policy_storage_accept_staged();
         if (err != ESP_OK) {
             printf("policy accept failed: %s\n", esp_err_to_name(err));
             return 1;

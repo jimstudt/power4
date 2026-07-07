@@ -268,6 +268,7 @@ The policy Lua environment currently provides:
 
 ```lua
 relay_on(1)   -- keep relay 1 on for 300 seconds
+relay_on(1, 3600) -- keep relay 1 on for an hour (1..86400 seconds)
 relay_off(1)  -- clear relay 1's policy timer
 on, forced, remaining = relay_state(1) -- output state, administrative force, timer seconds left
 config_is_set("generator_ok") -- true when set from the console
@@ -307,6 +308,12 @@ Paste or send that output to the controller console. After upload:
 show policy staged
 policy accept
 ```
+
+`policy accept` compile-checks the staged program before activating it. A
+program that does not parse is rejected with the Lua error and the current
+active policy is left in place. Runtime errors can still only be discovered
+live; they are reported through the policy syslog stream as
+`policy error (run): ...` once per cycle.
 
 JSON-producing commands print a framed line with the JSON length and SHA-1:
 

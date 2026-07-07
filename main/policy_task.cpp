@@ -1,6 +1,7 @@
 #include "policy_task.hpp"
 
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -28,6 +29,7 @@ constexpr const char *kTaskName = "policy";
 constexpr TickType_t kPolicyPeriodTicks = pdMS_TO_TICKS(CONFIG_POWER4_POLICY_PERIOD_SECONDS * 1000);
 constexpr int kLuaHookInstructionCount = 1000;
 constexpr uint32_t kRelayPolicyHoldSeconds = 300;
+constexpr lua_Integer kRelayPolicyHoldMaxSeconds = 86400;
 constexpr size_t kLuaSyslogMessageBytes = 192;
 constexpr const char *kEmptyPolicySource =
     "syslog(\"power4 policy: no active configuration\")\n";
@@ -53,13 +55,23 @@ void policy_lua_hook(lua_State *state, lua_Debug *debug)
     }
 }
 
+// Single emit point for policy syslog lines; Lua's syslog() and policy
+// error reporting share it so log scrapers see one consistent stream.
+void policy_syslog(const char *message)
+{
+    ESP_LOGI(kTag, "%s", message);
+}
+
 void log_lua_error(lua_State *state, const char *phase)
 {
     const char *message = lua_tostring(state, -1);
     if (message == nullptr) {
         message = "unknown Lua error";
     }
-    ESP_LOGW(kTag, "policy %s failed: %s", phase, message);
+
+    char line[kLuaSyslogMessageBytes] = {};
+    snprintf(line, sizeof(line), "policy error (%s): %s", phase, message);
+    policy_syslog(line);
 }
 
 uint8_t lua_check_relay(lua_State *state, int arg)
@@ -75,7 +87,17 @@ uint8_t lua_check_relay(lua_State *state, int arg)
 int lua_relay_on(lua_State *state)
 {
     const uint8_t relay = lua_check_relay(state, 1);
-    const esp_err_t err = relay_manager_on_for(relay, kRelayPolicyHoldSeconds);
+
+    uint32_t hold_seconds = kRelayPolicyHoldSeconds;
+    if (!lua_isnoneornil(state, 2)) {
+        const lua_Integer seconds = luaL_checkinteger(state, 2);
+        if (seconds < 1 || seconds > kRelayPolicyHoldMaxSeconds) {
+            luaL_argerror(state, 2, "hold seconds out of range");
+        }
+        hold_seconds = static_cast<uint32_t>(seconds);
+    }
+
+    const esp_err_t err = relay_manager_on_for(relay, hold_seconds);
     if (err != ESP_OK) {
         return luaL_error(state, "relay_on(%u) failed: %s", relay, esp_err_to_name(err));
     }
@@ -201,7 +223,7 @@ int lua_syslog(lua_State *state)
         lua_pop(state, 1);
     }
 
-    ESP_LOGI(kTag, "%s", message);
+    policy_syslog(message);
     return 0;
 }
 
@@ -317,6 +339,40 @@ void policy_task_main(void *arg)
 }
 
 }  // namespace
+
+esp_err_t policy_validate(const char *source,
+                          size_t length,
+                          char *error_message,
+                          size_t error_message_size)
+{
+    if (error_message != nullptr && error_message_size > 0) {
+        error_message[0] = '\0';
+    }
+    if (source == nullptr) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    lua_State *state = luaL_newstate();
+    if (state == nullptr) {
+        return ESP_ERR_NO_MEM;
+    }
+    *static_cast<LuaRunContext **>(lua_getextraspace(state)) = nullptr;
+
+    esp_err_t result = ESP_OK;
+    if (luaL_loadbuffer(state, source, length, "policy_staged") != LUA_OK) {
+        const char *message = lua_tostring(state, -1);
+        if (message == nullptr) {
+            message = "unknown Lua error";
+        }
+        if (error_message != nullptr && error_message_size > 0) {
+            strlcpy(error_message, message, error_message_size);
+        }
+        result = ESP_FAIL;
+    }
+
+    lua_close(state);
+    return result;
+}
 
 esp_err_t policy_task_start(void)
 {
