@@ -261,6 +261,7 @@ The policy Lua environment currently provides:
 ```lua
 relay_on(1)   -- keep relay 1 on for 300 seconds
 relay_off(1)  -- clear relay 1's policy timer
+on, forced, remaining = relay_state(1) -- output state, administrative force, timer seconds left
 config_is_set("generator_ok") -- true when set from the console
 syslog("policy reached generator_ok check") -- emit through ESP logging
 

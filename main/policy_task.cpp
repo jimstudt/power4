@@ -94,6 +94,22 @@ int lua_relay_off(lua_State *state)
     return 0;
 }
 
+int lua_relay_state(lua_State *state)
+{
+    const uint8_t relay = lua_check_relay(state, 1);
+
+    RelayStatus status = {};
+    const esp_err_t err = relay_manager_query(relay, &status);
+    if (err != ESP_OK) {
+        return luaL_error(state, "relay_state(%u) failed: %s", relay, esp_err_to_name(err));
+    }
+
+    lua_pushboolean(state, status.output_on);
+    lua_pushboolean(state, status.forced_on);
+    lua_pushinteger(state, static_cast<lua_Integer>(status.timer_remaining_s));
+    return 3;
+}
+
 int lua_config_is_set(lua_State *state)
 {
     const char *name = luaL_checkstring(state, 1);
@@ -195,6 +211,8 @@ void register_policy_lua_functions(lua_State *state)
     lua_setglobal(state, "relay_on");
     lua_pushcfunction(state, lua_relay_off);
     lua_setglobal(state, "relay_off");
+    lua_pushcfunction(state, lua_relay_state);
+    lua_setglobal(state, "relay_state");
     lua_pushcfunction(state, lua_config_is_set);
     lua_setglobal(state, "config_is_set");
     lua_pushcfunction(state, lua_battery_bank_state);
