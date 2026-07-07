@@ -1,5 +1,6 @@
 #include "config_gatt.hpp"
 
+#include <stdlib.h>
 #include <string.h>
 
 #include "config_flags.hpp"
@@ -62,31 +63,44 @@ ble_uuid128_t make_power4_uuid(uint16_t suffix)
 
 int read_flag_list(ble_gatt_access_ctxt *ctxt)
 {
-    ConfigFlagList flags = {};
-    esp_err_t err = config_flags_list(&flags);
+    // The flag list and its rendered text are too large for the NimBLE host
+    // task stack, so both live on the heap for the duration of the read.
+    struct FlagListScratch {
+        ConfigFlagList flags;
+        char value[kFlagListTextMaxBytes];
+    };
+    FlagListScratch *scratch = static_cast<FlagListScratch *>(calloc(1, sizeof(FlagListScratch)));
+    if (scratch == nullptr) {
+        ESP_LOGW(kTag, "failed to list config flags for GATT client: out of memory");
+        return BLE_ATT_ERR_INSUFFICIENT_RES;
+    }
+
+    esp_err_t err = config_flags_list(&scratch->flags);
     if (err != ESP_OK) {
         ESP_LOGW(kTag, "failed to list config flags for GATT client: %s", esp_err_to_name(err));
+        free(scratch);
         return BLE_ATT_ERR_UNLIKELY;
     }
 
-    char value[kFlagListTextMaxBytes] = {};
     size_t offset = 0;
-
-    for (size_t i = 0; i < flags.count; ++i) {
-        const char *name = flags.names[i];
+    for (size_t i = 0; i < scratch->flags.count; ++i) {
+        const char *name = scratch->flags.names[i];
         const size_t name_length = strlen(name);
-        if (offset + name_length + 1 > sizeof(value)) {
+        if (offset + name_length + 1 > sizeof(scratch->value)) {
             ESP_LOGW(kTag, "config flag list exceeded GATT read buffer");
+            free(scratch);
             return BLE_ATT_ERR_INSUFFICIENT_RES;
         }
 
-        memcpy(&value[offset], name, name_length);
+        memcpy(&scratch->value[offset], name, name_length);
         offset += name_length;
-        value[offset] = '\n';
+        scratch->value[offset] = '\n';
         ++offset;
     }
 
-    return os_mbuf_append(ctxt->om, value, offset) == 0 ? 0 : BLE_ATT_ERR_INSUFFICIENT_RES;
+    const int rc = os_mbuf_append(ctxt->om, scratch->value, offset);
+    free(scratch);
+    return rc == 0 ? 0 : BLE_ATT_ERR_INSUFFICIENT_RES;
 }
 
 int read_written_name(ble_gatt_access_ctxt *ctxt, char *name, size_t name_size)

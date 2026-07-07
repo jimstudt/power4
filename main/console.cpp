@@ -67,7 +67,7 @@ constexpr size_t kPolicyUploadMaxDecodedBytes = 8192;
 constexpr size_t kPolicyUploadMaxEncodedBytes = ((kPolicyUploadMaxDecodedBytes + 2) / 3) * 4;
 constexpr size_t kPolicyUploadLineBytes = 160;
 constexpr size_t kConsoleLineBytes = 256;
-constexpr uint32_t kConsoleTaskStackBytes = 4096;
+constexpr uint32_t kConsoleTaskStackBytes = 8192;
 constexpr UBaseType_t kConsoleTaskPriority = 4;
 
 portMUX_TYPE g_console_line_mux = portMUX_INITIALIZER_UNLOCKED;
@@ -309,32 +309,41 @@ int print_buffered_logs(void)
 
 int print_config_flags(void)
 {
-    ConfigFlagList flags = {};
-    const esp_err_t err = config_flags_list(&flags);
+    ConfigFlagList *flags = static_cast<ConfigFlagList *>(malloc(sizeof(ConfigFlagList)));
+    if (flags == nullptr) {
+        printf("set: error:out of memory\n");
+        return 1;
+    }
+
+    const esp_err_t err = config_flags_list(flags);
     if (err != ESP_OK) {
         printf("set: error:%s\n", esp_err_to_name(err));
+        free(flags);
         return 1;
     }
 
     printf("set:");
-    if (flags.count == 0) {
+    if (flags->count == 0) {
         printf(" none");
     }
-    for (size_t i = 0; i < flags.count; ++i) {
-        if (flags.lifetime_s[i] > 0) {
+    for (size_t i = 0; i < flags->count; ++i) {
+        if (flags->lifetime_s[i] > 0) {
             printf(" %s(%u/%us)",
-                   flags.names[i],
-                   static_cast<unsigned>(flags.remaining_s[i]),
-                   static_cast<unsigned>(flags.lifetime_s[i]));
+                   flags->names[i],
+                   static_cast<unsigned>(flags->remaining_s[i]),
+                   static_cast<unsigned>(flags->lifetime_s[i]));
         } else {
-            printf(" %s", flags.names[i]);
+            printf(" %s", flags->names[i]);
         }
     }
-    if (flags.truncated) {
+    if (flags->truncated) {
         printf(" ...");
     }
     printf("\n");
-    return flags.truncated ? 1 : 0;
+
+    const bool truncated = flags->truncated;
+    free(flags);
+    return truncated ? 1 : 0;
 }
 
 void print_show_usage(void)
@@ -354,11 +363,18 @@ void print_show_usage(void)
 
 int show_batteries_command(void)
 {
-    BatteryRecord records[CONFIG_POWER4_MAX_BATTERIES] = {};
+    BatteryRecord *records =
+        static_cast<BatteryRecord *>(calloc(CONFIG_POWER4_MAX_BATTERIES, sizeof(BatteryRecord)));
+    if (records == nullptr) {
+        printf("show batteries failed: out of memory\n");
+        return 1;
+    }
+
     size_t count = 0;
     const esp_err_t err = battery_store_snapshot(records, CONFIG_POWER4_MAX_BATTERIES, &count);
     if (err != ESP_OK) {
         printf("show batteries failed: %s\n", esp_err_to_name(err));
+        free(records);
         return 1;
     }
 
@@ -367,6 +383,7 @@ int show_batteries_command(void)
            static_cast<unsigned>(battery_store_capacity()));
     if (count == 0) {
         printf("none observed\n");
+        free(records);
         return 0;
     }
 
@@ -406,6 +423,7 @@ int show_batteries_command(void)
         }
     }
 
+    free(records);
     return 0;
 }
 
@@ -1044,11 +1062,18 @@ int report_relays_command(void)
 
 int report_batteries_command(void)
 {
-    BatteryRecord records[CONFIG_POWER4_MAX_BATTERIES] = {};
+    BatteryRecord *records =
+        static_cast<BatteryRecord *>(calloc(CONFIG_POWER4_MAX_BATTERIES, sizeof(BatteryRecord)));
+    if (records == nullptr) {
+        printf("report batteries failed: out of memory\n");
+        return 1;
+    }
+
     size_t count = 0;
     esp_err_t err = battery_store_snapshot(records, CONFIG_POWER4_MAX_BATTERIES, &count);
     if (err != ESP_OK) {
         printf("report batteries failed: %s\n", esp_err_to_name(err));
+        free(records);
         return 1;
     }
 
@@ -1057,6 +1082,7 @@ int report_batteries_command(void)
     char *json = static_cast<char *>(malloc(capacity));
     if (json == nullptr) {
         printf("report batteries failed: out of memory\n");
+        free(records);
         return 1;
     }
 
@@ -1094,6 +1120,7 @@ int report_batteries_command(void)
     }
 
     ok = ok && append_json(json, capacity, &used, "]}");
+    free(records);
     if (!ok) {
         printf("report batteries failed: JSON buffer too small\n");
         free(json);

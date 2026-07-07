@@ -260,7 +260,9 @@ esp_err_t battery_bank_list(BatteryBankList *list)
         return ESP_ERR_INVALID_ARG;
     }
 
-    *list = BatteryBankList {};
+    // memset instead of assigning a default-constructed temporary, which
+    // could place a full BatteryBankList on this stack.
+    memset(list, 0, sizeof(*list));
 
     StoredBatteryBanks *stored = alloc_banks();
     if (stored == nullptr) {

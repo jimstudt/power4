@@ -20,7 +20,7 @@ namespace {
 
 constexpr const char *kTag = "relay_manager";
 constexpr uint32_t kQueueLength = 16;
-constexpr uint32_t kTaskStackBytes = 4096;
+constexpr uint32_t kTaskStackBytes = 6144;
 constexpr UBaseType_t kTaskPriority = 5;
 constexpr TickType_t kRequestTimeout = pdMS_TO_TICKS(1000);
 

@@ -316,7 +316,9 @@ esp_err_t config_flags_list(ConfigFlagList *list)
         return ESP_ERR_INVALID_ARG;
     }
 
-    *list = ConfigFlagList {};
+    // memset instead of assigning a default-constructed temporary, which
+    // could place a full ConfigFlagList on this stack.
+    memset(list, 0, sizeof(*list));
 
     nvs_iterator_t iterator = nullptr;
     esp_err_t err = nvs_entry_find(NVS_DEFAULT_PART_NAME, kNamespace, NVS_TYPE_U8, &iterator);
