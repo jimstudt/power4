@@ -66,6 +66,11 @@ constexpr size_t kBankStateJsonBytesPerBank = 640;
 constexpr size_t kLogsJsonBaseBytes = 96;
 constexpr size_t kPolicyUploadMaxDecodedBytes = 8192;
 constexpr size_t kPolicyUploadMaxEncodedBytes = ((kPolicyUploadMaxDecodedBytes + 2) / 3) * 4;
+// The USB serial JTAG driver's ISR silently drops received bytes when its RX
+// ring buffer is full; there is no flow control back to the host. Tools like
+// power4ctl send a whole policy upload in one burst, so the ring must hold
+// the largest burst: the encoded policy plus line terminators and command.
+constexpr size_t kConsoleRxBufferBytes = 16384;
 constexpr size_t kPolicyUploadLineBytes = 160;
 constexpr size_t kConsoleLineBytes = 256;
 constexpr uint32_t kConsoleTaskStackBytes = 8192;
@@ -1820,6 +1825,7 @@ esp_err_t setup_console_device(void)
     usb_serial_jtag_vfs_set_tx_line_endings(ESP_LINE_ENDINGS_CRLF);
 
     usb_serial_jtag_driver_config_t usb_serial_jtag_config = USB_SERIAL_JTAG_DRIVER_CONFIG_DEFAULT();
+    usb_serial_jtag_config.rx_buffer_size = kConsoleRxBufferBytes;
     esp_err_t err = usb_serial_jtag_driver_install(&usb_serial_jtag_config);
     if (err != ESP_OK) {
         return err;
