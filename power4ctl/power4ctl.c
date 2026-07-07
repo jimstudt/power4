@@ -6,14 +6,15 @@
  *                  -D [-i interval] [-l lock-seconds] [-o outdir]
  *
  * Commands:
- *   json batteries / banks / relays
+ *   json batteries / banks / logs / relays
  *   stage <filename>
  *   <anything else>   sent verbatim; output echoed to stdout
  *
  * Daemon mode (-D):
- *   Loops forever, opening the serial port each cycle, collecting the three
- *   JSON reports, writing them atomically to the output directory, then
- *   closing the port and sleeping until the next interval.
+ *   Loops forever, opening the serial port each cycle, collecting the JSON
+ *   reports (batteries, banks, relays, logs), writing them atomically to
+ *   the output directory, then closing the port and sleeping until the
+ *   next interval.
  *
  * flock(LOCK_EX|LOCK_NB) + TIOCEXCL prevent concurrent access by separate
  * invocations.
@@ -247,7 +248,10 @@ static const char *g_port;
 #define PROMPT          "power4> "
 #define PROMPT_LEN      8
 #define PROMPT_ATTEMPTS 3
-#define LINEBUF         16384
+/* Must hold the largest single P4J1 frame. The logs report carries a 16 KB
+   log buffer that can grow to ~6x under JSON escaping, plus the frame
+   header, so allow for the worst case. */
+#define LINEBUF         131072
 #define B64_LINE_WIDTH  76      /* 57 input bytes → 76 base64 chars per line */
 
 /*
@@ -718,11 +722,11 @@ static int         g_interval     = 60;
 static int         g_lock_timeout = 5;
 static const char *g_outdir       = "/run/power4";
 
-static const char * const REPORTS[] = {"batteries", "banks", "relays"};
+static const char * const REPORTS[] = {"batteries", "banks", "relays", "logs"};
 #define NREPORTS ((int)(sizeof(REPORTS) / sizeof(REPORTS[0])))
 
 /*
- * Open the port, collect all three JSON reports, write them to g_outdir.
+ * Open the port, collect all JSON reports, write them to g_outdir.
  * Returns 0 on success (even if some reports fail), -1 if port unavailable.
  */
 static int do_one_cycle(void)
@@ -819,6 +823,7 @@ static void usage(void)
             "commands:\n"
             "  json batteries\n"
             "  json banks\n"
+            "  json logs\n"
             "  json relays\n"
             "  stage <filename>\n"
             "  <anything else>   sent verbatim; output echoed to stdout\n");
@@ -901,6 +906,7 @@ int main(int argc, char **argv)
 
     if (strcmp(command, "json batteries") == 0 ||
         strcmp(command, "json banks")     == 0 ||
+        strcmp(command, "json logs")      == 0 ||
         strcmp(command, "json relays")    == 0) {
         /* "json X" → send "report X\r" to device, expect P4J1 response */
         char dev_cmd[sizeof(command) + 2];

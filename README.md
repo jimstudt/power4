@@ -186,6 +186,7 @@ Report command examples:
 ```text
 report relays
 report batteries
+report logs
 report banks
 ```
 

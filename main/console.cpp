@@ -63,6 +63,7 @@ constexpr size_t kBatteryStateJsonBaseBytes = 96;
 constexpr size_t kBatteryStateJsonBytesPerBattery = 256;
 constexpr size_t kBankStateJsonBaseBytes = 96;
 constexpr size_t kBankStateJsonBytesPerBank = 640;
+constexpr size_t kLogsJsonBaseBytes = 96;
 constexpr size_t kPolicyUploadMaxDecodedBytes = 8192;
 constexpr size_t kPolicyUploadMaxEncodedBytes = ((kPolicyUploadMaxDecodedBytes + 2) / 3) * 4;
 constexpr size_t kPolicyUploadLineBytes = 160;
@@ -1225,11 +1226,70 @@ int report_banks_command(void)
     return 0;
 }
 
+int report_logs_command(void)
+{
+    char *text = static_cast<char *>(malloc(kLogBufferBytes + 1));
+    if (text == nullptr) {
+        printf("report logs failed: out of memory\n");
+        return 1;
+    }
+
+    const size_t length = log_buffer_snapshot(text, kLogBufferBytes);
+    text[length] = '\0';
+
+    // Escaped size varies per character, so measure before allocating.
+    size_t escaped = 0;
+    for (size_t i = 0; i < length; ++i) {
+        const unsigned char ch = static_cast<unsigned char>(text[i]);
+        if (ch == '"' || ch == '\\') {
+            escaped += 2;
+        } else if (ch >= ' ' && ch <= '~') {
+            escaped += 1;
+        } else {
+            escaped += 6;  // \uXXXX
+        }
+    }
+
+    const size_t capacity = kLogsJsonBaseBytes + escaped;
+    char *json = static_cast<char *>(malloc(capacity));
+    if (json == nullptr) {
+        printf("report logs failed: out of memory\n");
+        free(text);
+        return 1;
+    }
+
+    size_t used = 0;
+    bool ok = append_json(json,
+                          capacity,
+                          &used,
+                          "{\"type\":\"logs\",\"length\":%u,\"text\":",
+                          static_cast<unsigned>(length));
+    ok = ok && append_json_string(json, capacity, &used, text);
+    ok = ok && append_json(json, capacity, &used, "}");
+    free(text);
+
+    if (!ok) {
+        printf("report logs failed: JSON buffer too small\n");
+        free(json);
+        return 1;
+    }
+
+    const esp_err_t err = json_output_print(json);
+    free(json);
+    if (err != ESP_OK) {
+        printf("report logs failed: %s\n", esp_err_to_name(err));
+        return 1;
+    }
+
+    return 0;
+}
+
 void print_report_usage(void)
 {
     printf("usage:\n");
     printf("  report banks\n");
     printf("  report batteries\n");
+    printf("  report logs\n");
     printf("  report relays\n");
 }
 
@@ -1262,6 +1322,14 @@ int report_command(int argc, char **argv)
             return 1;
         }
         return report_batteries_command();
+    }
+
+    if (strcmp(argv[1], "logs") == 0) {
+        if (argc != 2) {
+            print_report_usage();
+            return 1;
+        }
+        return report_logs_command();
     }
 
     print_report_usage();
@@ -1681,6 +1749,7 @@ int power4_help_command(int argc, char **argv)
     printf("report:\n");
     printf("  report banks                print framed JSON battery-bank state\n");
     printf("  report batteries            print framed JSON battery observations\n");
+    printf("  report logs                 print framed JSON recent system log text\n");
     printf("  report relays               print framed JSON relay state\n");
     printf("\n");
     printf("set:\n");

@@ -92,6 +92,18 @@ When implementing configuration transfer:
 - report parse, validation, and runtime errors clearly,
 - avoid bricking the controller with a bad upload.
 
+## power4ctl Notes
+
+`LINEBUF` in `power4ctl/power4ctl.c` is deliberately huge (128 KB). A P4J1
+frame is a single line, and `report logs` carries the device's 16 KB log
+buffer as one JSON string that can grow to roughly 6x under `\uXXXX`
+escaping, so the line buffer must hold the worst case. The buffers are
+static and power4ctl runs on a Raspberry Pi, so this is currently free. If
+RAM ever gets tight there, address it here: chunk the logs report, stream
+the frame parse, or have the firmware escape newlines as two-character
+`\n` instead of the six-character unicode escape, which drops the worst
+case to about 2x.
+
 ## Testing and Verification
 
 Add tests around pure logic as soon as modules exist. Hardware-facing code should

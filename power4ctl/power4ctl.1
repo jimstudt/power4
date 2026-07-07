@@ -59,10 +59,11 @@ In daemon mode
 .RB ( \-D ),
 .B power4ctl
 runs indefinitely, opening the serial port at each interval, collecting
-the three JSON reports
+the JSON reports
 .RB ( batteries ,
 .BR banks ,
-.BR relays ),
+.BR relays ,
+.BR logs ),
 writing them atomically to the output directory, then closing the port
 and sleeping until the next interval.
 Each file is written to a hidden temporary name and then renamed into
@@ -123,8 +124,9 @@ Default:
 Directory where daemon mode writes
 .IR batteries.json ,
 .IR banks.json ,
+.IR relays.json ,
 and
-.I relays.json
+.I logs.json
 (created if it does not exist).
 Default:
 .IR /run/power4 .
@@ -137,6 +139,13 @@ JSON object to standard output.
 .B json banks
 Request the current battery bank state from the device and print the
 JSON object to standard output.
+.TP
+.B json logs
+Request a snapshot of the device's recent system log text (a rolling 16 KB
+buffer) and print the JSON object to standard output.
+The log text is in the object's
+.B text
+field.
 .TP
 .B json relays
 Request the current relay state from the device and print the JSON object
@@ -161,7 +170,7 @@ prompt returns.
 This provides full access to the device's console without a separate
 terminal emulator.
 .SH DAEMON OUTPUT FILES
-In daemon mode, three files are maintained under the output directory
+In daemon mode, four files are maintained under the output directory
 (default
 .IR /run/power4 ):
 .TP
@@ -173,6 +182,9 @@ Current battery bank state.
 .TP
 .I relays.json
 Current relay state.
+.TP
+.I logs.json
+Snapshot of the device's recent system log text (rolling 16 KB buffer).
 .PP
 Each file is written atomically: new content is first written to
 .RI .tmp. name .json
