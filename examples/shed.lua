@@ -10,11 +10,12 @@
 --   2  48v -> 24v DC/DC converter, moves energy into the 24v banks
 --   3  generator run control, charges the 48v bank
 --
--- Policy flags (define policy <name>=true [<seconds>s]):
---   force_pi              hold the raspberry pi on
---   force_48v_to_24v      hold the DC/DC converter on
---   force_48v_generator   hold the generator on (overrides forbid)
---   forbid_48v_generator  suppress automatic generator runs
+-- Policy flags (define policy <name>=true [<seconds>s]).
+-- Flag names are NVS keys, so they are limited to 15 characters.
+--   force_pi        hold the raspberry pi on
+--   force_48v_24v   hold the DC/DC converter on
+--   force_48v_gen   hold the generator on (overrides forbid)
+--   forbid_48v_gen  suppress automatic generator runs
 --
 -- The policy runs once a minute. Relays are held on a deadman timer and
 -- refreshed each cycle; if this policy stops running, everything except an
@@ -73,7 +74,7 @@ if soc24 ~= nil and ready48 then
 else
     syslog("dcdc: bank state not ready, no automatic control")
 end
-if config_is_set("force_48v_to_24v") then
+if config_is_set("force_48v_24v") then
     want_dcdc = true
 end
 
@@ -97,11 +98,11 @@ if ready48 then
 else
     syslog("generator: 48v bank not ready, no automatic control")
 end
-if want_generator and config_is_set("forbid_48v_generator") then
-    syslog("generator: wanted but forbidden by forbid_48v_generator")
+if want_generator and config_is_set("forbid_48v_gen") then
+    syslog("generator: wanted but forbidden by forbid_48v_gen")
     want_generator = false
 end
-if config_is_set("force_48v_generator") then
+if config_is_set("force_48v_gen") then
     want_generator = true
 end
 

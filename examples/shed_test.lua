@@ -34,6 +34,9 @@ function relay_off(n)
 end
 
 function config_is_set(name)
+    -- Flag names are NVS keys on the device: 15 characters maximum.
+    assert(#name >= 1 and #name <= 15 and name:match("^[%w_%-]+$"),
+           "invalid policy flag name: " .. name)
     return flags[name] == true
 end
 
@@ -100,26 +103,26 @@ scenario("48v above 60, generator on stops",
 
 scenario("48v low but generator forbidden",
     { banks = { ["48v"] = { soc = 25 }, ["24v-a"] = { soc = 90 }, ["24v-b"] = { soc = 90 } },
-      flags = { forbid_48v_generator = true } },
+      flags = { forbid_48v_gen = true } },
     "")
 
 scenario("forbidden generator running gets stopped",
     { banks = { ["48v"] = { soc = 45 }, ["24v-a"] = { soc = 90 }, ["24v-b"] = { soc = 90 } },
       relays = { [3] = true },
-      flags = { forbid_48v_generator = true } },
+      flags = { forbid_48v_gen = true } },
     "off(3)")
 
 scenario("force overrides forbid",
     { banks = full,
-      flags = { forbid_48v_generator = true, force_48v_generator = true } },
+      flags = { forbid_48v_gen = true, force_48v_gen = true } },
     "on(3,300)")
 
 scenario("force_pi holds pi for an hour",
     { banks = full, flags = { force_pi = true } },
     "on(1,3600)")
 
-scenario("force_48v_to_24v runs dcdc regardless of soc",
-    { banks = full, flags = { force_48v_to_24v = true } },
+scenario("force_48v_24v runs dcdc regardless of soc",
+    { banks = full, flags = { force_48v_24v = true } },
     "on(2,300)")
 
 scenario("one 24v bank missing: no dcdc decision, no off",
@@ -134,7 +137,7 @@ scenario("48v missing: running relays left to deadman",
 
 scenario("48v missing but forces still work",
     { banks = {},
-      flags = { force_pi = true, force_48v_to_24v = true, force_48v_generator = true } },
+      flags = { force_pi = true, force_48v_24v = true, force_48v_gen = true } },
     "on(1,3600) on(2,300) on(3,300)")
 
 if failures > 0 then

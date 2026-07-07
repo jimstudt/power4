@@ -135,6 +135,19 @@ int lua_relay_state(lua_State *state)
 int lua_config_is_set(lua_State *state)
 {
     const char *name = luaL_checkstring(state, 1);
+    if (!config_flags_valid_name(name)) {
+        // An impossible name can never be set, so answer false rather than
+        // killing the policy run, but leave a trail for the policy author.
+        char line[kLuaSyslogMessageBytes] = {};
+        snprintf(line,
+                 sizeof(line),
+                 "config_is_set(%s): impossible flag name "
+                 "(1-15 characters: letters, digits, '_', '-'), returning false",
+                 name);
+        policy_syslog(line);
+        lua_pushboolean(state, false);
+        return 1;
+    }
 
     bool is_set = false;
     const esp_err_t err = config_flags_is_set(name, &is_set);

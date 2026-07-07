@@ -875,8 +875,14 @@ int define_command(int argc, char **argv)
         bool value = false;
         uint32_t lifetime_s = 0;
         if ((argc != 3 && argc != 4) || !split_assignment(argv[2], &name, &value_text) ||
-            !config_flags_valid_name(name) || !parse_on_off(value_text, &value)) {
+            !parse_on_off(value_text, &value)) {
             print_define_usage();
+            return 1;
+        }
+        if (!config_flags_valid_name(name)) {
+            printf("cannot set policy flag '%s': names are 1-15 characters of "
+                   "letters, digits, '_', '-'\n",
+                   name);
             return 1;
         }
         if (argc == 4 && (!value || !parse_lifetime(argv[3], &lifetime_s))) {
@@ -937,8 +943,14 @@ int remove_command(int argc, char **argv)
     }
 
     if (strcmp(argv[1], "policy") == 0) {
-        if (argc != 3 || !config_flags_valid_name(argv[2])) {
+        if (argc != 3) {
             print_remove_usage();
+            return 1;
+        }
+        if (!config_flags_valid_name(argv[2])) {
+            printf("no such policy flag '%s': names are 1-15 characters of "
+                   "letters, digits, '_', '-'\n",
+                   argv[2]);
             return 1;
         }
 
@@ -1471,6 +1483,10 @@ int policy_upload_staged(const uint8_t expected_sha1[kChecksumSha1Bytes])
     printf("uploaded staged configuration: %u bytes sha1=%s\n",
            static_cast<unsigned>(decoded_length),
            actual_hex);
+    ESP_LOGI(kTag,
+             "policy staged: %u bytes sha1=%s",
+             static_cast<unsigned>(decoded_length),
+             actual_hex);
 
     free(encoded);
     free(decoded);
@@ -1536,12 +1552,18 @@ int policy_command(int argc, char **argv)
 
         char lua_error[192] = {};
         err = policy_validate(staged, staged_length, lua_error, sizeof(lua_error));
-        free(staged);
         if (err != ESP_OK) {
+            free(staged);
             printf("policy accept rejected: %s\n",
                    lua_error[0] != '\0' ? lua_error : esp_err_to_name(err));
             return 1;
         }
+
+        char sha1_hex[kChecksumSha1HexChars + 1] = {};
+        if (checksum_sha1_hex(staged, staged_length, sha1_hex) != ESP_OK) {
+            sha1_hex[0] = '\0';
+        }
+        free(staged);
 
         err = policy_storage_accept_staged();
         if (err != ESP_OK) {
@@ -1550,6 +1572,10 @@ int policy_command(int argc, char **argv)
         }
 
         printf("accepted staged policy as active\n");
+        ESP_LOGI(kTag,
+                 "policy accepted: %u bytes sha1=%s",
+                 static_cast<unsigned>(staged_length),
+                 sha1_hex);
         return 0;
     }
 
