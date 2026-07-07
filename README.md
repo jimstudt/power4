@@ -173,7 +173,13 @@ show policy
 show policy staged
 show policy-flags
 show debug
+show logs
 ```
+
+`show logs` prints the most recent system log text, kept in a 16 KB rolling
+buffer fed by a hook on ESP logging. The buffer holds everything the firmware
+logs, including policy syslog lines and policy errors, so recent history is
+inspectable after the fact from the console.
 
 Report command examples:
 

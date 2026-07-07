@@ -9,6 +9,7 @@ idf_component_register(
         "config_flags.cpp"
         "console.cpp"
         "json_output.cpp"
+        "log_buffer.cpp"
         "main.cpp"
         "policy_task.cpp"
         "policy_storage.cpp"

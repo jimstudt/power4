@@ -3,6 +3,7 @@
 #include "battery_scanner.hpp"
 #include "battery_store.hpp"
 #include "console.hpp"
+#include "log_buffer.hpp"
 #include "policy_task.hpp"
 #include "policy_storage.hpp"
 #include "relay_manager.hpp"
@@ -20,6 +21,7 @@ constexpr const char *kTag = "power4";
 
 extern "C" void app_main(void)
 {
+    ESP_ERROR_CHECK(log_buffer_init());
     ESP_LOGI(kTag, "starting power4");
     ESP_ERROR_CHECK(policy_storage_init());
     ESP_ERROR_CHECK(battery_store_init());

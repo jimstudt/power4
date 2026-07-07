@@ -15,6 +15,7 @@
 #include "checksum.hpp"
 #include "config_flags.hpp"
 #include "json_output.hpp"
+#include "log_buffer.hpp"
 #include "policy_storage.hpp"
 #include "policy_task.hpp"
 #include "relay_manager.hpp"
@@ -284,6 +285,28 @@ int print_all_relays(void)
     return result;
 }
 
+int print_buffered_logs(void)
+{
+    char *text = static_cast<char *>(malloc(kLogBufferBytes));
+    if (text == nullptr) {
+        printf("show logs failed: out of memory\n");
+        return 1;
+    }
+
+    const size_t length = log_buffer_snapshot(text, kLogBufferBytes);
+    if (length == 0) {
+        printf("log buffer is empty\n");
+    } else {
+        fwrite(text, 1, length, stdout);
+        if (text[length - 1] != '\n') {
+            printf("\n");
+        }
+    }
+
+    free(text);
+    return 0;
+}
+
 int print_config_flags(void)
 {
     ConfigFlagList flags = {};
@@ -321,6 +344,7 @@ void print_show_usage(void)
     printf("  show banks\n");
     printf("  show ble\n");
     printf("  show debug\n");
+    printf("  show logs\n");
     printf("  show policy\n");
     printf("  show policy-flags\n");
     printf("  show policy staged\n");
@@ -441,6 +465,14 @@ int show_command(int argc, char **argv)
 
         print_show_usage();
         return 1;
+    }
+
+    if (strcmp(argv[1], "logs") == 0) {
+        if (argc != 2) {
+            print_show_usage();
+            return 1;
+        }
+        return print_buffered_logs();
     }
 
     if (strcmp(argv[1], "policy-flags") == 0) {
@@ -1612,6 +1644,7 @@ int power4_help_command(int argc, char **argv)
     printf("  show banks                  list configured battery banks\n");
     printf("  show ble                    list BLE GAP procedure and connection state\n");
     printf("  show debug                  show volatile debug settings\n");
+    printf("  show logs                   print recent system log text\n");
     printf("  show policy                 print the active policy program\n");
     printf("  show policy staged          print the staged policy program\n");
     printf("  show policy-flags           list persistent policy flags\n");
