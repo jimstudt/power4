@@ -39,6 +39,33 @@ make clean
 
 Keep new developer workflows behind Make targets when they become routine.
 
+## Release Versioning
+
+`version.txt` at the repository root is the single source of the release
+number, as a bare semver like `1.1.1` (no leading `v`). The firmware and
+the power4ctl Debian package always share this number:
+
+- ESP-IDF automatically uses a project-root `version.txt` as the app
+  version (it overrides `git describe`), so the firmware reports it.
+- `power4ctl/Makefile` reads `../version.txt` for the `.deb` version and
+  package filename.
+
+Do not hardcode a version anywhere else; read it from `version.txt`.
+
+To cut a release:
+
+1. `version.txt` already holds the next patch number (see step 5); if
+   the release warrants a minor or major bump instead, edit it first.
+2. Commit, then tag it `v<version>` (annotated, message style
+   `power4 1.1.0: short summary`).
+3. `make package` for the firmware bundle; `make deb` on the Raspberry Pi
+   for the Debian package.
+4. `gh release create v<version>` with the tarball and `.deb` attached.
+5. Immediately bump the patch number in `version.txt` and commit, so
+   development builds cannot be mistaken for the released version —
+   `version.txt` overrides `git describe`, so an unreleased build would
+   otherwise report the released number.
+
 ## ESP-IDF / FreeRTOS Conventions
 
 - Prefer ESP-IDF APIs and idioms over custom platform wrappers unless a wrapper

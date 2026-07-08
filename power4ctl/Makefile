@@ -1,7 +1,12 @@
 CC      ?= cc
 CFLAGS  ?= -Wall -Wextra -O2
 TARGET   = power4ctl
-VERSION  = 1.1.0
+# The release version is shared with the firmware; it lives in version.txt
+# at the repository root. See "Release Versioning" in AGENTS.md.
+VERSION := $(strip $(shell cat ../version.txt))
+ifeq ($(VERSION),)
+$(error cannot read version from ../version.txt)
+endif
 OBJS     = power4ctl.o sha1.o
 
 BINDIR      = /usr/local/bin
