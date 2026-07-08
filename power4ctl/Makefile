@@ -1,7 +1,7 @@
 CC      ?= cc
 CFLAGS  ?= -Wall -Wextra -O2
 TARGET   = power4ctl
-VERSION  = 1.0.1
+VERSION  = 1.1.0
 OBJS     = power4ctl.o sha1.o
 
 BINDIR      = /usr/local/bin
