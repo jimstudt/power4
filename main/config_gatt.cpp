@@ -19,7 +19,10 @@ constexpr uint16_t kServiceUuidSuffix = 0x2000;
 constexpr uint16_t kListUuidSuffix = 0x2001;
 constexpr uint16_t kSetUuidSuffix = 0x2002;
 constexpr uint16_t kUnsetUuidSuffix = 0x2003;
-constexpr size_t kFlagListTextMaxBytes = kConfigFlagListMax * kConfigFlagNameMaxBytes;
+// Room per entry for "name=value\n"; numeric values render as name=value,
+// boolean flags as the bare name.
+constexpr size_t kFlagListTextMaxBytes =
+    kConfigFlagListMax * (kConfigFlagNameMaxBytes + kConfigNumberTextMaxBytes);
 
 enum class Characteristic : uint8_t {
     List,
@@ -85,8 +88,10 @@ int read_flag_list(ble_gatt_access_ctxt *ctxt)
     size_t offset = 0;
     for (size_t i = 0; i < scratch->flags.count; ++i) {
         const char *name = scratch->flags.names[i];
+        const char *value = scratch->flags.values[i];
         const size_t name_length = strlen(name);
-        if (offset + name_length + 1 > sizeof(scratch->value)) {
+        const size_t value_length = value[0] != '\0' ? strlen(value) + 1 : 0;  // "=value"
+        if (offset + name_length + value_length + 1 > sizeof(scratch->value)) {
             ESP_LOGW(kTag, "config flag list exceeded GATT read buffer");
             free(scratch);
             return BLE_ATT_ERR_INSUFFICIENT_RES;
@@ -94,6 +99,12 @@ int read_flag_list(ble_gatt_access_ctxt *ctxt)
 
         memcpy(&scratch->value[offset], name, name_length);
         offset += name_length;
+        if (value_length > 0) {
+            scratch->value[offset] = '=';
+            ++offset;
+            memcpy(&scratch->value[offset], value, value_length - 1);
+            offset += value_length - 1;
+        }
         scratch->value[offset] = '\n';
         ++offset;
     }
@@ -132,7 +143,7 @@ int write_flag(ble_gatt_access_ctxt *ctxt, bool set_flag)
         return result;
     }
 
-    const esp_err_t err = set_flag ? config_flags_set(name, 0) : config_flags_unset(name);
+    const esp_err_t err = set_flag ? config_flags_set(name, true, 0) : config_flags_unset(name);
     if (err != ESP_OK) {
         ESP_LOGW(kTag,
                  "failed to %s config flag '%s' for GATT client: %s",

@@ -148,7 +148,7 @@ int lua_config_is_set(lua_State *state)
         char line[kLuaSyslogMessageBytes] = {};
         snprintf(line,
                  sizeof(line),
-                 "config_is_set(%s): impossible flag name "
+                 "config_is_set(%s): impossible parameter name "
                  "(1-15 characters: letters, digits, '_', '-'), returning false",
                  name);
         policy_syslog(line);
@@ -163,6 +163,98 @@ int lua_config_is_set(lua_State *state)
     }
 
     lua_pushboolean(state, is_set);
+    return 1;
+}
+
+// Push the caller's optional default (argument 2) or nil.
+int lua_push_config_default(lua_State *state)
+{
+    if (lua_gettop(state) >= 2) {
+        lua_pushvalue(state, 2);
+    } else {
+        lua_pushnil(state);
+    }
+    return 1;
+}
+
+// Syslog why a config read is answering the default rather than killing
+// the policy run, leaving a trail for the policy author.
+void syslog_config_default(const char *function, const char *name, const char *why)
+{
+    char line[kLuaSyslogMessageBytes] = {};
+    snprintf(line, sizeof(line), "%s(%s): %s, returning default", function, name, why);
+    policy_syslog(line);
+}
+
+int lua_config_number(lua_State *state)
+{
+    const char *name = luaL_checkstring(state, 1);
+    if (!config_flags_valid_name(name)) {
+        syslog_config_default("config_number",
+                              name,
+                              "impossible parameter name "
+                              "(1-15 characters: letters, digits, '_', '-')");
+        return lua_push_config_default(state);
+    }
+
+    char text[kConfigNumberTextMaxBytes] = {};
+    bool found = false;
+    const esp_err_t err = config_flags_get_number(name, text, sizeof(text), &found);
+    if (err != ESP_OK) {
+        return luaL_error(state, "config_number(%s) failed: %s", name, esp_err_to_name(err));
+    }
+
+    if (!found) {
+        // A boolean under this name is a likely policy bug; say so.
+        ConfigFlagType type = ConfigFlagType::NotSet;
+        if (config_flags_type(name, &type) == ESP_OK && type == ConfigFlagType::Boolean) {
+            syslog_config_default("config_number", name, "holds a boolean");
+        }
+        return lua_push_config_default(state);
+    }
+
+    ConfigNumber number = {};
+    if (!config_number_parse(text, &number)) {
+        syslog_config_default("config_number", name, "stored value is not numeric");
+        return lua_push_config_default(state);
+    }
+
+    if (number.is_integer) {
+        lua_pushinteger(state, static_cast<lua_Integer>(number.integer));
+    } else {
+        lua_pushnumber(state, static_cast<lua_Number>(number.value));
+    }
+    return 1;
+}
+
+int lua_config_bool(lua_State *state)
+{
+    const char *name = luaL_checkstring(state, 1);
+    if (!config_flags_valid_name(name)) {
+        syslog_config_default("config_bool",
+                              name,
+                              "impossible parameter name "
+                              "(1-15 characters: letters, digits, '_', '-')");
+        return lua_push_config_default(state);
+    }
+
+    bool value = false;
+    bool found = false;
+    const esp_err_t err = config_flags_get_bool(name, &value, &found);
+    if (err != ESP_OK) {
+        return luaL_error(state, "config_bool(%s) failed: %s", name, esp_err_to_name(err));
+    }
+
+    if (!found) {
+        // A number under this name is a likely policy bug; say so.
+        ConfigFlagType type = ConfigFlagType::NotSet;
+        if (config_flags_type(name, &type) == ESP_OK && type == ConfigFlagType::Number) {
+            syslog_config_default("config_bool", name, "holds a number");
+        }
+        return lua_push_config_default(state);
+    }
+
+    lua_pushboolean(state, value);
     return 1;
 }
 
@@ -257,6 +349,10 @@ void register_policy_lua_functions(lua_State *state)
     lua_setglobal(state, "relay_state");
     lua_pushcfunction(state, lua_config_is_set);
     lua_setglobal(state, "config_is_set");
+    lua_pushcfunction(state, lua_config_number);
+    lua_setglobal(state, "config_number");
+    lua_pushcfunction(state, lua_config_bool);
+    lua_setglobal(state, "config_bool");
     lua_pushcfunction(state, lua_battery_bank_state);
     lua_setglobal(state, "battery_bank_state");
     lua_pushcfunction(state, lua_battery_bank_names);
@@ -311,7 +407,7 @@ void run_policy_cycle(TickType_t deadline)
 {
     const esp_err_t expire_err = config_flags_expire();
     if (expire_err != ESP_OK) {
-        ESP_LOGW(kTag, "policy flag expiry failed: %s", esp_err_to_name(expire_err));
+        ESP_LOGW(kTag, "policy parameter expiry failed: %s", esp_err_to_name(expire_err));
     }
 
     char *active_source = nullptr;

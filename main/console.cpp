@@ -317,29 +317,30 @@ int print_config_flags(void)
 {
     ConfigFlagList *flags = static_cast<ConfigFlagList *>(malloc(sizeof(ConfigFlagList)));
     if (flags == nullptr) {
-        printf("set: error:out of memory\n");
+        printf("parameters: error:out of memory\n");
         return 1;
     }
 
     const esp_err_t err = config_flags_list(flags);
     if (err != ESP_OK) {
-        printf("set: error:%s\n", esp_err_to_name(err));
+        printf("parameters: error:%s\n", esp_err_to_name(err));
         free(flags);
         return 1;
     }
 
-    printf("set:");
+    printf("parameters:");
     if (flags->count == 0) {
         printf(" none");
     }
     for (size_t i = 0; i < flags->count; ++i) {
+        printf(" %s", flags->names[i]);
+        if (flags->values[i][0] != '\0') {
+            printf("=%s", flags->values[i]);
+        }
         if (flags->lifetime_s[i] > 0) {
-            printf(" %s(%u/%us)",
-                   flags->names[i],
+            printf("(%u/%us)",
                    static_cast<unsigned>(flags->remaining_s[i]),
                    static_cast<unsigned>(flags->lifetime_s[i]));
-        } else {
-            printf(" %s", flags->names[i]);
         }
     }
     if (flags->truncated) {
@@ -361,7 +362,7 @@ void print_show_usage(void)
     printf("  show debug\n");
     printf("  show logs\n");
     printf("  show policy\n");
-    printf("  show policy-flags\n");
+    printf("  show policy parameters\n");
     printf("  show policy staged\n");
     printf("  show relays\n");
     printf("  show system\n");
@@ -486,6 +487,9 @@ int show_command(int argc, char **argv)
         if (argc == 3 && strcmp(argv[2], "staged") == 0) {
             return print_policy_slot(PolicySlot::Staged);
         }
+        if (argc == 3 && strcmp(argv[2], "parameters") == 0) {
+            return print_config_flags();
+        }
 
         print_show_usage();
         return 1;
@@ -497,14 +501,6 @@ int show_command(int argc, char **argv)
             return 1;
         }
         return print_buffered_logs();
-    }
-
-    if (strcmp(argv[1], "policy-flags") == 0) {
-        if (argc != 2) {
-            print_show_usage();
-            return 1;
-        }
-        return print_config_flags();
     }
 
     if (strcmp(argv[1], "relays") == 0) {
@@ -723,21 +719,17 @@ bool parse_lifetime(const char *text, uint32_t *seconds)
     return parse_u32(stripped, seconds) && *seconds > 0;
 }
 
-bool split_assignment(char *text, char **name, char **value)
+char *trim_token(char *text)
 {
-    if (text == nullptr || name == nullptr || value == nullptr) {
-        return false;
+    while (*text == ' ') {
+        ++text;
     }
-
-    char *equals = strchr(text, '=');
-    if (equals == nullptr || equals == text || equals[1] == '\0') {
-        return false;
+    char *end = text + strlen(text);
+    while (end > text && end[-1] == ' ') {
+        --end;
     }
-
-    *equals = '\0';
-    *name = text;
-    *value = equals + 1;
-    return true;
+    *end = '\0';
+    return text;
 }
 
 void print_set_usage(void)
@@ -842,8 +834,7 @@ void print_define_usage(void)
 {
     printf("usage:\n");
     printf("  define bank <name> <battery> [battery...]\n");
-    printf("  define policy <name>=true [<seconds>s]\n");
-    printf("  define policy <name>=false\n");
+    printf("  define policy <name>=true|false|<number> [<seconds>s]\n");
 }
 
 int define_command(int argc, char **argv)
@@ -884,36 +875,77 @@ int define_command(int argc, char **argv)
     }
 
     if (strcmp(argv[1], "policy") == 0) {
-        char *name = nullptr;
-        char *value_text = nullptr;
-        bool value = false;
-        uint32_t lifetime_s = 0;
-        if ((argc != 3 && argc != 4) || !split_assignment(argv[2], &name, &value_text) ||
-            !parse_on_off(value_text, &value)) {
+        // Rejoin the arguments so "name=40", "name =40", and "name = 40"
+        // all parse the same; the console splits arguments on spaces.
+        char assignment[80] = {};
+        size_t used = 0;
+        for (int i = 2; i < argc; ++i) {
+            const size_t length = strlen(argv[i]);
+            if (used + length + 2 > sizeof(assignment)) {
+                print_define_usage();
+                return 1;
+            }
+            if (used > 0) {
+                assignment[used++] = ' ';
+            }
+            memcpy(&assignment[used], argv[i], length);
+            used += length;
+        }
+        assignment[used] = '\0';
+
+        char *equals = strchr(assignment, '=');
+        if (equals == nullptr) {
             print_define_usage();
             return 1;
         }
-        if (!config_flags_valid_name(name)) {
-            printf("cannot set policy flag '%s': names are 1-15 characters of "
-                   "letters, digits, '_', '-'\n",
-                   name);
-            return 1;
-        }
-        if (argc == 4 && (!value || !parse_lifetime(argv[3], &lifetime_s))) {
+        *equals = '\0';
+        const char *name = trim_token(assignment);
+
+        char *save = nullptr;
+        char *value_text = strtok_r(equals + 1, " ", &save);
+        char *lifetime_text = strtok_r(nullptr, " ", &save);
+        if (value_text == nullptr || strtok_r(nullptr, " ", &save) != nullptr) {
             print_define_usage();
             return 1;
         }
 
-        const esp_err_t err = value ? config_flags_set(name, lifetime_s) : config_flags_unset(name);
+        if (!config_flags_valid_name(name)) {
+            printf("cannot set policy parameter '%s': names are 1-15 characters of "
+                   "letters, digits, '_', '-'\n",
+                   name);
+            return 1;
+        }
+
+        uint32_t lifetime_s = 0;
+        if (lifetime_text != nullptr && !parse_lifetime(lifetime_text, &lifetime_s)) {
+            print_define_usage();
+            return 1;
+        }
+
+        bool bool_value = false;
+        ConfigNumber number = {};
+        esp_err_t err = ESP_OK;
+        const char *echo_value = value_text;
+        if (parse_on_off(value_text, &bool_value)) {
+            err = config_flags_set(name, bool_value, lifetime_s);
+            echo_value = bool_value ? "true" : "false";
+        } else if (config_number_parse(value_text, &number)) {
+            err = config_flags_set_number(name, value_text, lifetime_s);
+        } else {
+            printf("cannot set policy parameter '%s': value must be true, false, or a number\n",
+                   name);
+            return 1;
+        }
+
         if (err != ESP_OK) {
             printf("define policy %s failed: %s\n", name, esp_err_to_name(err));
             return 1;
         }
 
         if (lifetime_s > 0) {
-            printf("policy %s=true for %us\n", name, static_cast<unsigned>(lifetime_s));
+            printf("policy %s=%s for %us\n", name, echo_value, static_cast<unsigned>(lifetime_s));
         } else {
-            printf("policy %s=%s\n", name, value ? "true" : "false");
+            printf("policy %s=%s\n", name, echo_value);
         }
         return 0;
     }
@@ -962,14 +994,14 @@ int remove_command(int argc, char **argv)
             return 1;
         }
         if (!config_flags_valid_name(argv[2])) {
-            printf("no such policy flag '%s': names are 1-15 characters of "
+            printf("no such policy parameter '%s': names are 1-15 characters of "
                    "letters, digits, '_', '-'\n",
                    argv[2]);
             return 1;
         }
 
-        bool was_set = false;
-        esp_err_t err = config_flags_is_set(argv[2], &was_set);
+        ConfigFlagType type = ConfigFlagType::NotSet;
+        esp_err_t err = config_flags_type(argv[2], &type);
         if (err != ESP_OK) {
             printf("remove policy %s failed: %s\n", argv[2], esp_err_to_name(err));
             return 1;
@@ -981,7 +1013,9 @@ int remove_command(int argc, char **argv)
             return 1;
         }
 
-        printf("removed policy %s%s\n", argv[2], was_set ? "" : " (was not defined)");
+        printf("removed policy %s%s\n",
+               argv[2],
+               type != ConfigFlagType::NotSet ? "" : " (was not defined)");
         return 0;
     }
 
@@ -1787,7 +1821,7 @@ int power4_help_command(int argc, char **argv)
     printf("  show logs                   print recent system log text\n");
     printf("  show policy                 print the active policy program\n");
     printf("  show policy staged          print the staged policy program\n");
-    printf("  show policy-flags           list persistent policy flags\n");
+    printf("  show policy parameters      list persistent policy parameters\n");
     printf("  show relays                 list relay state\n");
     printf("  show system                 show firmware, uptime, heap, NVS, and tasks\n");
     printf("\n");
@@ -1808,7 +1842,7 @@ int power4_help_command(int argc, char **argv)
     printf("define/remove:\n");
     printf("  define bank <name> <battery> [battery...]\n");
     printf("  remove bank <name>\n");
-    printf("  define policy <name>=true|false [<seconds>s]\n");
+    printf("  define policy <name>=true|false|<number> [<seconds>s]\n");
     printf("  remove policy <name>\n");
     printf("\n");
     printf("policy program:\n");

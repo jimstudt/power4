@@ -1,6 +1,9 @@
 #include "config_flags.hpp"
 
 #include <ctype.h>
+#include <errno.h>
+#include <math.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "esp_log.h"
@@ -12,8 +15,8 @@ namespace {
 
 constexpr const char *kTag = "config_flags";
 constexpr const char *kNamespace = "config";
-// Lifetimes live in their own namespace so the flag entries in "config"
-// stay plain u8 values. Key names match the flag names.
+// Lifetimes live in their own namespace so the parameter entries in
+// "config" stay plain value strings. Key names match the parameter names.
 constexpr const char *kTtlNamespace = "policy_ttl";
 
 // Uptime-based deadlines for flags with a lifetime. Entries are rebuilt on
@@ -184,30 +187,19 @@ esp_err_t ttl_get(const char *name, uint32_t *lifetime_s)
     return err;
 }
 
-}  // namespace
-
-bool config_flags_valid_name(const char *name)
+// Record or clear the lifetime bookkeeping before the value itself is
+// written, so an interruption cannot leave a lifetime value behind as a
+// permanent one. An orphaned lifetime entry is cleaned up by
+// config_flags_expire().
+esp_err_t record_lifetime(const char *name, uint32_t lifetime_s)
 {
-    return validate_name(name) == ESP_OK;
-}
-
-esp_err_t config_flags_set(const char *name, uint32_t lifetime_s)
-{
-    esp_err_t err = validate_name(name);
-    if (err != ESP_OK) {
-        return err;
-    }
-
-    // Record the lifetime before the flag itself so an interruption cannot
-    // leave a lifetime flag behind as a permanent one. An orphaned lifetime
-    // entry is cleaned up by config_flags_expire().
     if (lifetime_s > 0) {
         if (!deadline_refresh(name, lifetime_s)) {
             return ESP_ERR_NO_MEM;
         }
 
         nvs_handle_t ttl_handle = 0;
-        err = open_ttl(NVS_READWRITE, &ttl_handle);
+        esp_err_t err = open_ttl(NVS_READWRITE, &ttl_handle);
         if (err != ESP_OK) {
             deadline_drop(name);
             return err;
@@ -221,12 +213,118 @@ esp_err_t config_flags_set(const char *name, uint32_t lifetime_s)
             deadline_drop(name);
             return err;
         }
-    } else {
-        err = ttl_erase(name);
-        if (err != ESP_OK) {
-            return err;
+        return ESP_OK;
+    }
+
+    const esp_err_t err = ttl_erase(name);
+    if (err != ESP_OK) {
+        return err;
+    }
+    deadline_drop(name);
+    return ESP_OK;
+}
+
+// Read a parameter's stored text. found is false when the name is unset.
+esp_err_t read_value_text(const char *name, char *text, size_t text_bytes, bool *found)
+{
+    text[0] = '\0';
+    *found = false;
+
+    nvs_handle_t handle = 0;
+    esp_err_t err = open_config(NVS_READONLY, &handle);
+    if (err == ESP_ERR_NVS_NOT_FOUND) {
+        return ESP_OK;
+    }
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    size_t length = text_bytes;
+    err = nvs_get_str(handle, name, text, &length);
+    nvs_close(handle);
+
+    if (err == ESP_ERR_NVS_NOT_FOUND || err == ESP_ERR_NVS_TYPE_MISMATCH) {
+        text[0] = '\0';
+        return ESP_OK;
+    }
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    *found = true;
+    return ESP_OK;
+}
+
+bool boolean_text_value(const char *text, bool *value)
+{
+    if (strcmp(text, "true") == 0) {
+        *value = true;
+        return true;
+    }
+    if (strcmp(text, "false") == 0) {
+        *value = false;
+        return true;
+    }
+    return false;
+}
+
+}  // namespace
+
+bool config_flags_valid_name(const char *name)
+{
+    return validate_name(name) == ESP_OK;
+}
+
+bool config_number_parse(const char *text, ConfigNumber *number)
+{
+    if (text == nullptr || number == nullptr || text[0] == '\0') {
+        return false;
+    }
+    if (strlen(text) >= kConfigNumberTextMaxBytes) {
+        return false;
+    }
+
+    // Restrict the alphabet up front: keeps strtod from accepting hex,
+    // inf, and nan spellings that would surprise a policy author.
+    for (const char *c = text; *c != '\0'; ++c) {
+        if (!isdigit(static_cast<unsigned char>(*c)) && *c != '+' && *c != '-' && *c != '.' &&
+            *c != 'e' && *c != 'E') {
+            return false;
         }
-        deadline_drop(name);
+    }
+
+    errno = 0;
+    char *end = nullptr;
+    const long long as_integer = strtoll(text, &end, 10);
+    if (end != text && *end == '\0' && errno == 0) {
+        number->is_integer = true;
+        number->integer = as_integer;
+        number->value = static_cast<double>(as_integer);
+        return true;
+    }
+
+    errno = 0;
+    const double as_double = strtod(text, &end);
+    if (end == text || *end != '\0' || errno != 0 || !isfinite(as_double)) {
+        return false;
+    }
+
+    number->is_integer = false;
+    number->integer = 0;
+    number->value = as_double;
+    return true;
+}
+
+esp_err_t config_flags_set(const char *name, bool value, uint32_t lifetime_s)
+{
+    esp_err_t err = validate_name(name);
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    err = record_lifetime(name, lifetime_s);
+    if (err != ESP_OK) {
+        return err;
     }
 
     nvs_handle_t handle = 0;
@@ -235,7 +333,39 @@ esp_err_t config_flags_set(const char *name, uint32_t lifetime_s)
         return err;
     }
 
-    err = nvs_set_u8(handle, name, 1);
+    err = nvs_set_str(handle, name, value ? "true" : "false");
+    if (err == ESP_OK) {
+        err = nvs_commit(handle);
+    }
+
+    nvs_close(handle);
+    return err;
+}
+
+esp_err_t config_flags_set_number(const char *name, const char *text, uint32_t lifetime_s)
+{
+    esp_err_t err = validate_name(name);
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    ConfigNumber parsed = {};
+    if (!config_number_parse(text, &parsed)) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    err = record_lifetime(name, lifetime_s);
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    nvs_handle_t handle = 0;
+    err = open_config(NVS_READWRITE, &handle);
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    err = nvs_set_str(handle, name, text);
     if (err == ESP_OK) {
         err = nvs_commit(handle);
     }
@@ -286,27 +416,102 @@ esp_err_t config_flags_is_set(const char *name, bool *is_set)
         return err;
     }
 
-    nvs_handle_t handle = 0;
-    err = open_config(NVS_READONLY, &handle);
-    if (err == ESP_ERR_NVS_NOT_FOUND) {
-        return ESP_OK;
-    }
+    char text[kConfigNumberTextMaxBytes] = {};
+    bool found = false;
+    err = read_value_text(name, text, sizeof(text), &found);
     if (err != ESP_OK) {
         return err;
     }
 
-    uint8_t value = 0;
-    err = nvs_get_u8(handle, name, &value);
-    nvs_close(handle);
+    // A numeric entry under this name is not a set boolean flag.
+    *is_set = found && strcmp(text, "true") == 0;
+    return ESP_OK;
+}
 
-    if (err == ESP_ERR_NVS_NOT_FOUND) {
-        return ESP_OK;
+esp_err_t config_flags_get_bool(const char *name, bool *value, bool *found)
+{
+    if (value == nullptr || found == nullptr) {
+        return ESP_ERR_INVALID_ARG;
     }
+    *value = false;
+    *found = false;
+
+    esp_err_t err = validate_name(name);
     if (err != ESP_OK) {
         return err;
     }
 
-    *is_set = value != 0;
+    char text[kConfigNumberTextMaxBytes] = {};
+    bool stored = false;
+    err = read_value_text(name, text, sizeof(text), &stored);
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    // Unset, or a number under this name: not a boolean.
+    *found = stored && boolean_text_value(text, value);
+    return ESP_OK;
+}
+
+esp_err_t config_flags_get_number(const char *name, char *text, size_t text_bytes, bool *found)
+{
+    if (text == nullptr || text_bytes < kConfigNumberTextMaxBytes || found == nullptr) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    text[0] = '\0';
+    *found = false;
+
+    esp_err_t err = validate_name(name);
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    bool stored = false;
+    err = read_value_text(name, text, text_bytes, &stored);
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    // Unset, or a boolean under this name: not a number.
+    bool boolean_value = false;
+    if (!stored || boolean_text_value(text, &boolean_value)) {
+        text[0] = '\0';
+        return ESP_OK;
+    }
+
+    *found = true;
+    return ESP_OK;
+}
+
+esp_err_t config_flags_type(const char *name, ConfigFlagType *type)
+{
+    if (type == nullptr) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    *type = ConfigFlagType::NotSet;
+
+    esp_err_t err = validate_name(name);
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    char text[kConfigNumberTextMaxBytes] = {};
+    bool found = false;
+    err = read_value_text(name, text, sizeof(text), &found);
+    if (err != ESP_OK) {
+        return err;
+    }
+    if (!found) {
+        return ESP_OK;
+    }
+
+    bool boolean_value = false;
+    ConfigNumber number = {};
+    if (boolean_text_value(text, &boolean_value)) {
+        *type = ConfigFlagType::Boolean;
+    } else if (config_number_parse(text, &number)) {
+        *type = ConfigFlagType::Number;
+    }
     return ESP_OK;
 }
 
@@ -320,12 +525,24 @@ esp_err_t config_flags_list(ConfigFlagList *list)
     // could place a full ConfigFlagList on this stack.
     memset(list, 0, sizeof(*list));
 
-    nvs_iterator_t iterator = nullptr;
-    esp_err_t err = nvs_entry_find(NVS_DEFAULT_PART_NAME, kNamespace, NVS_TYPE_U8, &iterator);
+    // Read-only handle for fetching value text while iterating.
+    nvs_handle_t handle = 0;
+    esp_err_t err = open_config(NVS_READONLY, &handle);
     if (err == ESP_ERR_NVS_NOT_FOUND) {
         return ESP_OK;
     }
     if (err != ESP_OK) {
+        return err;
+    }
+
+    nvs_iterator_t iterator = nullptr;
+    err = nvs_entry_find(NVS_DEFAULT_PART_NAME, kNamespace, NVS_TYPE_STR, &iterator);
+    if (err == ESP_ERR_NVS_NOT_FOUND) {
+        nvs_close(handle);
+        return ESP_OK;
+    }
+    if (err != ESP_OK) {
+        nvs_close(handle);
         return err;
     }
 
@@ -334,11 +551,17 @@ esp_err_t config_flags_list(ConfigFlagList *list)
         err = nvs_entry_info(iterator, &info);
         if (err != ESP_OK) {
             nvs_release_iterator(iterator);
+            nvs_close(handle);
             return err;
         }
 
         if (list->count < kConfigFlagListMax) {
             strlcpy(list->names[list->count], info.key, kConfigFlagNameMaxBytes);
+
+            size_t length = kConfigNumberTextMaxBytes;
+            if (nvs_get_str(handle, info.key, list->values[list->count], &length) != ESP_OK) {
+                list->values[list->count][0] = '\0';
+            }
 
             uint32_t lifetime_s = 0;
             if (ttl_get(info.key, &lifetime_s) == ESP_OK && lifetime_s > 0) {
@@ -355,14 +578,17 @@ esp_err_t config_flags_list(ConfigFlagList *list)
 
         err = nvs_entry_next(&iterator);
         if (err == ESP_ERR_NVS_NOT_FOUND) {
+            nvs_close(handle);
             return ESP_OK;
         }
         if (err != ESP_OK) {
             nvs_release_iterator(iterator);
+            nvs_close(handle);
             return err;
         }
     }
 
+    nvs_close(handle);
     return ESP_OK;
 }
 
@@ -414,11 +640,11 @@ esp_err_t config_flags_expire(void)
     for (size_t i = 0; i < entry_count; ++i) {
         const char *name = entries[i].name;
 
-        bool is_set = false;
-        if (config_flags_is_set(name, &is_set) != ESP_OK) {
+        ConfigFlagType type = ConfigFlagType::NotSet;
+        if (config_flags_type(name, &type) != ESP_OK) {
             continue;
         }
-        if (!is_set) {
+        if (type == ConfigFlagType::NotSet) {
             // Orphaned lifetime entry, e.g. from an interrupted set.
             ttl_erase(name);
             deadline_drop(name);
@@ -430,10 +656,11 @@ esp_err_t config_flags_expire(void)
             continue;
         }
         if (remaining_s == 0) {
-            ESP_LOGI(kTag, "policy flag %s expired after %us", name, entries[i].lifetime_s);
+            ESP_LOGI(kTag, "policy parameter %s expired after %us", name, entries[i].lifetime_s);
             config_flags_unset(name);
         }
     }
 
     return ESP_OK;
 }
+

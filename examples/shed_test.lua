@@ -4,12 +4,13 @@
 
 local POLICY = arg[1] or "examples/shed.lua"
 
-local banks, relays, flags, calls
+local banks, relays, flags, numbers, calls
 
 local function reset(env)
     banks = env.banks
     relays = env.relays or {}
     flags = env.flags or {}
+    numbers = env.numbers or {}
     calls = {}
 end
 
@@ -35,10 +36,30 @@ function relay_off(n)
 end
 
 function config_is_set(name)
-    -- Flag names are NVS keys on the device: 15 characters maximum.
+    -- Parameter names are NVS keys on the device: 15 characters maximum.
     assert(#name >= 1 and #name <= 15 and name:match("^[%w_%-]+$"),
-           "invalid policy flag name: " .. name)
+           "invalid policy parameter name: " .. name)
     return flags[name] == true
+end
+
+function config_number(name, default)
+    assert(#name >= 1 and #name <= 15 and name:match("^[%w_%-]+$"),
+           "invalid policy parameter name: " .. name)
+    local value = numbers[name]
+    if value == nil then
+        return default
+    end
+    return value
+end
+
+function config_bool(name, default)
+    assert(#name >= 1 and #name <= 15 and name:match("^[%w_%-]+$"),
+           "invalid policy parameter name: " .. name)
+    local value = flags[name]
+    if value == nil then
+        return default
+    end
+    return value == true
 end
 
 function syslog(...) end
@@ -102,21 +123,47 @@ scenario("48v above 60, generator on stops",
       relays = { [3] = true } },
     "off(3)")
 
-scenario("48v low but generator forbidden",
+scenario("48v low but generator not allowed",
     { banks = { ["48v"] = { soc = 25 }, ["24v-a"] = { soc = 90 }, ["24v-b"] = { soc = 90 } },
-      flags = { forbid_48v_gen = true } },
+      flags = { ["allow-generator"] = false } },
     "")
 
-scenario("forbidden generator running gets stopped",
+scenario("disallowed generator running gets stopped",
     { banks = { ["48v"] = { soc = 45 }, ["24v-a"] = { soc = 90 }, ["24v-b"] = { soc = 90 } },
       relays = { [3] = true },
-      flags = { forbid_48v_gen = true } },
+      flags = { ["allow-generator"] = false } },
     "off(3)")
 
-scenario("force overrides forbid",
+scenario("force overrides allow-generator=false",
     { banks = full,
-      flags = { forbid_48v_gen = true, force_48v_gen = true } },
+      flags = { ["allow-generator"] = false, force_48v_gen = true } },
     "on(3,300)")
+
+scenario("explicit allow-generator=true acts like default",
+    { banks = { ["48v"] = { soc = 25 }, ["24v-a"] = { soc = 90 }, ["24v-b"] = { soc = 90 } },
+      flags = { ["allow-generator"] = true } },
+    "on(3,300)")
+
+scenario("gen_start raised by parameter starts in dead band",
+    { banks = { ["48v"] = { soc = 45 }, ["24v-a"] = { soc = 90 }, ["24v-b"] = { soc = 90 } },
+      numbers = { gen_start = 50 } },
+    "on(3,300)")
+
+scenario("gen_stop lowered by parameter stops running generator",
+    { banks = { ["48v"] = { soc = 45 }, ["24v-a"] = { soc = 90 }, ["24v-b"] = { soc = 90 } },
+      relays = { [3] = true },
+      numbers = { gen_stop = 40 } },
+    "off(3)")
+
+scenario("dcdc thresholds moved by parameters",
+    { banks = { ["48v"] = { soc = 80 }, ["24v-a"] = { soc = 60 }, ["24v-b"] = { soc = 60 } },
+      numbers = { dcdc_start = 65 } },
+    "on(2,300)")
+
+scenario("dcdc_source_min raised by parameter blocks transfer",
+    { banks = { ["48v"] = { soc = 25 }, ["24v-a"] = { soc = 40 }, ["24v-b"] = { soc = 40 } },
+      numbers = { dcdc_source_min = 30, gen_start = 20 } },
+    "")
 
 scenario("force_pi holds pi for an hour",
     { banks = full, flags = { force_pi = true } },

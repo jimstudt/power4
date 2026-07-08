@@ -171,7 +171,7 @@ show batteries
 show banks
 show policy
 show policy staged
-show policy-flags
+show policy parameters
 show debug
 show logs
 ```
@@ -224,24 +224,40 @@ Persistent definition examples:
 define policy generator_ok=true
 define policy gen_running=true 300s
 define policy generator_ok=false
+define policy b24_low_limit=40
+define policy soc_target=87.5
 remove policy generator_ok
 define bank house pack_a pack_b
 show banks
 remove bank house
 ```
 
-Policy names are stored as boolean flags in the `config` NVS namespace. Names
-are limited to 1-15 characters: letters, digits, underscore, and hyphen.
+Policy parameters are stored in the `config` NVS namespace. Names are
+limited to 1-15 characters: letters, digits, underscore, and hyphen.
 `define policy` rejects an impossible name with an explanatory error, and
-`config_is_set()` in a policy program answers `false` for one (logging the
-attempt) rather than aborting the policy run.
+the config readers in a policy program answer their default for one
+(logging the attempt) rather than aborting the policy run.
 
-A flag may be given an optional lifetime in seconds. A lifetime flag acts as a
-dead-man switch: unless it is refreshed by another `define policy` within its
-lifetime, it is removed just before a policy cycle runs. Lifetimes are stored
+A policy parameter is either a boolean or a number. Numbers may be integers
+or floats (`40`, `-3`, `87.5`, `1e3`). Every parameter is stored as an NVS
+string of its text form — `true`, `false`, or the numeric text — so values
+are inspectable, `show policy parameters` reports them as `name=value`, and
+a policy program reads numbers back with the integer/float distinction
+intact. A name holds one value: defining a number replaces a boolean of the
+same name and vice versa. Spaces around the `=` are accepted.
+
+`define policy <name>=false` stores an explicit false — it does not remove
+the parameter — so a policy program can distinguish "set false" from "never
+defined" and apply a default (see `config_bool()` below). `remove policy
+<name>` returns a name to undefined.
+
+A parameter may be given an optional lifetime in seconds. A lifetime
+value acts as a dead-man switch: unless it is refreshed by another
+`define policy` within its lifetime, it is removed just before a policy
+cycle runs. Lifetimes are stored
 in the `policy_ttl` NVS namespace and the countdown restarts from the full
-lifetime after a reboot. `show policy-flags` reports lifetime flags as
-`name(remaining/authorized)`, for example `gen_running(287/300s)`.
+lifetime after a reboot. `show policy parameters` reports lifetime values as
+`name=value(remaining/authorized)`, for example `gen_running=true(287/300s)`.
 
 BLE scanner debug logging defaults to off. Turning it on prints advertisement
 details, scan summaries, raw JBD basic-info packets, and decoded battery packet
@@ -287,7 +303,9 @@ relay_on(1)   -- keep relay 1 on for 300 seconds
 relay_on(1, 3600) -- keep relay 1 on for an hour (1..86400 seconds)
 relay_off(1)  -- clear relay 1's policy timer
 on, force, remaining = relay_state(1) -- output state, force ("on"/"off"/nil), timer seconds left
-config_is_set("generator_ok") -- true when set from the console
+config_is_set("generator_ok") -- true only when defined true
+config_bool("allow-generator", true) -- boolean parameter, or the default (nil if omitted) when unset
+config_number("b24_low_limit", 40) -- numeric parameter, or the default (nil if omitted) when unset
 syslog("policy reached generator_ok check") -- emit through ESP logging
 
 ready, volts, amps, soc = battery_bank_state("house")
@@ -481,7 +499,8 @@ skipped.
 
 `examples/shed.lua` is a complete site policy managing a 48v bank charged by
 a generator and a pair of paralleled 24v banks fed from the 48v bank through
-a DC/DC converter, with hysteresis, deadman holds, and manual override flags.
+a DC/DC converter, with hysteresis, deadman holds, manual override flags,
+and tunable thresholds read from policy parameters.
 `examples/shed_test.lua` runs it against scripted scenarios on a host with a
 stock Lua 5.4 interpreter:
 
@@ -492,8 +511,9 @@ lua5.4 examples/shed_test.lua examples/shed.lua
 ## Repository Status
 
 The firmware and `power4ctl` are in service running a real installation:
-BLE battery monitoring, battery banks, the Lua policy engine, policy flags
-with lifetimes, relay deadman holds, log capture, and JSON reporting are all
+BLE battery monitoring, battery banks, the Lua policy engine, policy
+parameters with lifetimes, relay deadman holds, log capture, and JSON
+reporting are all
 functional. BLE access remains unauthenticated, and policy staging is
 console-only by design.
 

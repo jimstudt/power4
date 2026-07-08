@@ -10,12 +10,20 @@
 --   2  48v -> 24v DC/DC converter, moves energy into the 24v banks
 --   3  generator run control, charges the 48v bank
 --
--- Policy flags (define policy <name>=true [<seconds>s]).
--- Flag names are NVS keys, so they are limited to 15 characters.
+-- Policy parameters (define policy <name>=<value> [<seconds>s]).
+-- Parameter names are NVS keys, so they are limited to 15 characters.
+-- Boolean flags:
 --   force_pi        hold the raspberry pi on
 --   force_48v_24v   hold the DC/DC converter on
---   force_48v_gen   hold the generator on (overrides forbid)
---   forbid_48v_gen  suppress automatic generator runs
+--   force_48v_gen   hold the generator on (overrides allow-generator)
+--   allow-generator defaults true; set false to suppress automatic
+--                   generator runs
+-- Numbers (defaults shown; state of charge percentages):
+--   dcdc_start      50  start moving energy into the 24v banks below this
+--   dcdc_stop       70  stop moving energy above this
+--   dcdc_source_min 20  never drain the 48v bank below this
+--   gen_start       30  start the generator below this
+--   gen_stop        60  stop the generator above this
 --
 -- The policy runs once a minute. Relays are held on a deadman timer and
 -- refreshed each cycle; if this policy stops running, everything except an
@@ -33,13 +41,13 @@ local HOLD_SECONDS = 300      -- 5 minute deadman for automatic relays
 local PI_HOLD_SECONDS = 3600  -- 60 minute deadman for the raspberry pi
 
 -- 24v bank charging hysteresis (average of 24v-a and 24v-b)
-local DCDC_START_SOC = 50       -- start moving energy below this
-local DCDC_STOP_SOC = 70        -- stop moving energy above this
-local DCDC_SOURCE_MIN_SOC = 20  -- never drain the 48v bank below this
+local DCDC_START_SOC = config_number("dcdc_start", 50)
+local DCDC_STOP_SOC = config_number("dcdc_stop", 70)
+local DCDC_SOURCE_MIN_SOC = config_number("dcdc_source_min", 20)
 
 -- 48v bank generator hysteresis
-local GENERATOR_START_SOC = 30
-local GENERATOR_STOP_SOC = 60
+local GENERATOR_START_SOC = config_number("gen_start", 30)
+local GENERATOR_STOP_SOC = config_number("gen_stop", 60)
 
 local ready48, _, _, soc48 = battery_bank_state("48v")
 local ready24a, _, _, soc24a = battery_bank_state("24v-a")
@@ -98,8 +106,8 @@ if ready48 then
 else
     syslog("generator: 48v bank not ready, no automatic control")
 end
-if want_generator and config_is_set("forbid_48v_gen") then
-    syslog("generator: wanted but forbidden by forbid_48v_gen")
+if want_generator and not config_bool("allow-generator", true) then
+    syslog("generator: wanted but disabled by allow-generator=false")
     want_generator = false
 end
 if config_is_set("force_48v_gen") then
