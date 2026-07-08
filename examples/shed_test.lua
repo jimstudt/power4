@@ -22,7 +22,8 @@ function battery_bank_state(name)
 end
 
 function relay_state(n)
-    return relays[n] == true, false, relays[n] and 200 or 0
+    -- Second value is the administrative force: "on", "off", or nil.
+    return relays[n] == true, nil, relays[n] and 200 or 0
 end
 
 function relay_on(n, seconds)

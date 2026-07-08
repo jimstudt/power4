@@ -266,7 +266,7 @@ void print_relay_status(const RelayStatus &status)
     if (status.timer_active) {
         printf(" remaining=%" PRIu32 "s", status.timer_remaining_s);
     }
-    printf(" override=%s\n", status.forced_on ? "on" : "off");
+    printf(" force=%s\n", relay_force_name(status.force));
 }
 
 int query_and_print_relay(uint8_t relay)
@@ -747,6 +747,7 @@ void print_set_usage(void)
     printf("  set debug ble_scanner off\n");
     printf("  set relay <relay> on [seconds]\n");
     printf("  set relay <relay> force-on\n");
+    printf("  set relay <relay> force-off\n");
     printf("  set relay <relay> clear-force\n");
 }
 
@@ -809,6 +810,19 @@ int set_command(int argc, char **argv)
                 return 1;
             }
             const esp_err_t err = relay_manager_force_on(relay);
+            if (err != ESP_OK) {
+                printf("set relay failed: %s\n", esp_err_to_name(err));
+                return 1;
+            }
+            return query_and_print_relay(relay);
+        }
+
+        if (strcmp(argv[3], "force-off") == 0) {
+            if (argc != 4) {
+                print_set_usage();
+                return 1;
+            }
+            const esp_err_t err = relay_manager_force_off(relay);
             if (err != ESP_OK) {
                 printf("set relay failed: %s\n", esp_err_to_name(err));
                 return 1;
@@ -1050,7 +1064,7 @@ int report_relays_command(void)
                          &used,
                          "%s{\"id\":%u,\"gpio\":%d,\"active_level\":%u,"
                          "\"output_on\":%s,\"timer_active\":%s,"
-                         "\"timer_remaining_s\":%" PRIu32 ",\"admin_override\":%s}",
+                         "\"timer_remaining_s\":%" PRIu32 ",\"force\":\"%s\"}",
                          relay == 1 ? "" : ",",
                          status.relay,
                          status.gpio_pin,
@@ -1058,7 +1072,7 @@ int report_relays_command(void)
                          status.output_on ? "true" : "false",
                          status.timer_active ? "true" : "false",
                          status.timer_remaining_s,
-                         status.forced_on ? "true" : "false");
+                         relay_force_name(status.force));
     }
 
     ok = ok && append_json(json, capacity, &used, "]}");
@@ -1788,7 +1802,8 @@ int power4_help_command(int argc, char **argv)
     printf("  set debug ble_scanner off   disable verbose BLE scanner logging\n");
     printf("  set relay <n> on [seconds]  turn relay on for a bounded time\n");
     printf("  set relay <n> force-on      force relay on administratively\n");
-    printf("  set relay <n> clear-force   clear administrative force-on\n");
+    printf("  set relay <n> force-off     force relay off, overriding any timer\n");
+    printf("  set relay <n> clear-force   clear administrative force\n");
     printf("\n");
     printf("define/remove:\n");
     printf("  define bank <name> <battery> [battery...]\n");

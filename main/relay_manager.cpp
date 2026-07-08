@@ -26,7 +26,7 @@ constexpr TickType_t kRequestTimeout = pdMS_TO_TICKS(1000);
 
 struct RelayState {
     bool timer_active = false;
-    bool forced_on = false;
+    RelayForce force = RelayForce::None;
     bool output_on = false;
     int64_t off_at_us = 0;
 };
@@ -34,6 +34,7 @@ struct RelayState {
 enum class MessageType : uint8_t {
     OnFor,
     ForceOn,
+    ForceOff,
     ClearForce,
     Query,
 };
@@ -85,7 +86,7 @@ RelayStatus make_status(uint8_t relay, const RelayState &state, int64_t now)
     status.gpio_pin = static_cast<int>(g_relay_gpio[relay - 1]);
     status.active_level = CONFIG_POWER4_RELAY_ACTIVE_LEVEL;
     status.timer_active = state.timer_active;
-    status.forced_on = state.forced_on;
+    status.force = state.force;
     status.output_on = state.output_on;
     if (state.timer_active) {
         status.timer_remaining_s = remaining_seconds(now, state.off_at_us);
@@ -192,7 +193,19 @@ esp_err_t configure_relay_gpio(void)
 
 void apply_output(uint8_t relay, RelayState *state)
 {
-    const bool desired_on = state->forced_on || state->timer_active;
+    bool desired_on = false;
+    switch (state->force) {
+    case RelayForce::On:
+        desired_on = true;
+        break;
+    case RelayForce::Off:
+        desired_on = false;
+        break;
+    case RelayForce::None:
+        desired_on = state->timer_active;
+        break;
+    }
+
     if (state->output_on == desired_on) {
         return;
     }
@@ -210,12 +223,12 @@ void apply_output(uint8_t relay, RelayState *state)
     }
 
     ESP_LOGI(kTag,
-             "relay %u GPIO %d output %s (timer=%s override=%s)",
+             "relay %u GPIO %d output %s (timer=%s force=%s)",
              relay,
              static_cast<int>(g_relay_gpio[relay - 1]),
              desired_on ? "on" : "off",
              state->timer_active ? "on" : "off",
-             state->forced_on ? "on" : "off");
+             relay_force_name(state->force));
 }
 
 void expire_timers(int64_t now)
@@ -259,12 +272,17 @@ void handle_message(const RelayMessage &message)
     }
 
     case MessageType::ForceOn:
-        state.forced_on = true;
+        state.force = RelayForce::On;
+        apply_output(message.relay, &state);
+        break;
+
+    case MessageType::ForceOff:
+        state.force = RelayForce::Off;
         apply_output(message.relay, &state);
         break;
 
     case MessageType::ClearForce:
-        state.forced_on = false;
+        state.force = RelayForce::None;
         apply_output(message.relay, &state);
         break;
 
@@ -325,6 +343,19 @@ esp_err_t send_command(MessageType type, uint8_t relay, uint32_t seconds = 0)
 
 }  // namespace
 
+const char *relay_force_name(RelayForce force)
+{
+    switch (force) {
+    case RelayForce::On:
+        return "on";
+    case RelayForce::Off:
+        return "off";
+    case RelayForce::None:
+        break;
+    }
+    return "none";
+}
+
 uint8_t relay_manager_count(void)
 {
     return CONFIG_POWER4_RELAY_COUNT;
@@ -364,6 +395,11 @@ esp_err_t relay_manager_on_for(uint8_t relay, uint32_t seconds)
 esp_err_t relay_manager_force_on(uint8_t relay)
 {
     return send_command(MessageType::ForceOn, relay);
+}
+
+esp_err_t relay_manager_force_off(uint8_t relay)
+{
+    return send_command(MessageType::ForceOff, relay);
 }
 
 esp_err_t relay_manager_clear_force(uint8_t relay)

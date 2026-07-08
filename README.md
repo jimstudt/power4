@@ -209,8 +209,14 @@ set debug ble_scanner on
 set debug ble_scanner off
 set relay 1 on 30
 set relay 1 force-on
+set relay 1 force-off
 set relay 1 clear-force
 ```
+
+A forced relay ignores its policy timer: `force-off` keeps the relay open no
+matter what policy does (for example, while working on wiring) and `force-on`
+holds it closed. A relay holds one force at a time; setting a force replaces
+the previous one and `clear-force` returns the relay to timer control.
 
 Persistent definition examples:
 
@@ -280,7 +286,7 @@ The policy Lua environment currently provides:
 relay_on(1)   -- keep relay 1 on for 300 seconds
 relay_on(1, 3600) -- keep relay 1 on for an hour (1..86400 seconds)
 relay_off(1)  -- clear relay 1's policy timer
-on, forced, remaining = relay_state(1) -- output state, administrative force, timer seconds left
+on, force, remaining = relay_state(1) -- output state, force ("on"/"off"/nil), timer seconds left
 config_is_set("generator_ok") -- true when set from the console
 syslog("policy reached generator_ok check") -- emit through ESP logging
 

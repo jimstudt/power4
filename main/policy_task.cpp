@@ -127,7 +127,14 @@ int lua_relay_state(lua_State *state)
     }
 
     lua_pushboolean(state, status.output_on);
-    lua_pushboolean(state, status.forced_on);
+    if (status.force == RelayForce::None) {
+        // nil when no administrative force, "on"/"off" otherwise, so
+        // `if force then` still answers "is a force active" and the
+        // string answers which direction it holds.
+        lua_pushnil(state);
+    } else {
+        lua_pushstring(state, relay_force_name(status.force));
+    }
     lua_pushinteger(state, static_cast<lua_Integer>(status.timer_remaining_s));
     return 3;
 }
