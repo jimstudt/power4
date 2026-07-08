@@ -423,10 +423,6 @@ void run_policy_cycle(TickType_t deadline)
     const size_t length = has_active_policy ? active_length : strlen(kEmptyPolicySource);
     const char *chunk_name = has_active_policy ? "policy_active" : "policy_empty";
 
-    ESP_LOGI(kTag,
-             "running %s policy (%u bytes)",
-             has_active_policy ? "active" : "empty",
-             static_cast<unsigned>(length));
     if (!run_lua_policy(source, length, chunk_name, deadline)) {
         ESP_LOGW(kTag, "policy cycle did not complete successfully");
     }
