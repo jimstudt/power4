@@ -256,8 +256,9 @@ value acts as a dead-man switch: unless it is refreshed by another
 `define policy` within its lifetime, it is removed just before a policy
 cycle runs. Lifetimes are stored
 in the `policy_ttl` NVS namespace and the countdown restarts from the full
-lifetime after a reboot. `show policy parameters` reports lifetime values as
-`name=value(remaining/authorized)`, for example `gen_running=true(287/300s)`.
+lifetime after a reboot. `show policy parameters` lists parameters one per
+line in alphabetical order and reports lifetime values as
+`name=value (remaining/authorized)`, for example `gen_running=true (287/300s)`.
 
 BLE scanner debug logging defaults to off. Turning it on prints advertisement
 details, scan summaries, raw JBD basic-info packets, and decoded battery packet

@@ -328,25 +328,36 @@ int print_config_flags(void)
         return 1;
     }
 
-    printf("parameters:");
+    // NVS iteration order is arbitrary; present the names alphabetically.
+    size_t order[kConfigFlagListMax];
+    for (size_t i = 0; i < flags->count; ++i) {
+        size_t j = i;
+        while (j > 0 && strcmp(flags->names[i], flags->names[order[j - 1]]) < 0) {
+            order[j] = order[j - 1];
+            --j;
+        }
+        order[j] = i;
+    }
+
     if (flags->count == 0) {
-        printf(" none");
+        printf("parameters: none\n");
     }
     for (size_t i = 0; i < flags->count; ++i) {
-        printf(" %s", flags->names[i]);
-        if (flags->values[i][0] != '\0') {
-            printf("=%s", flags->values[i]);
+        const size_t k = order[i];
+        printf("%s", flags->names[k]);
+        if (flags->values[k][0] != '\0') {
+            printf("=%s", flags->values[k]);
         }
-        if (flags->lifetime_s[i] > 0) {
-            printf("(%u/%us)",
-                   static_cast<unsigned>(flags->remaining_s[i]),
-                   static_cast<unsigned>(flags->lifetime_s[i]));
+        if (flags->lifetime_s[k] > 0) {
+            printf(" (%u/%us)",
+                   static_cast<unsigned>(flags->remaining_s[k]),
+                   static_cast<unsigned>(flags->lifetime_s[k]));
         }
+        printf("\n");
     }
     if (flags->truncated) {
-        printf(" ...");
+        printf("...\n");
     }
-    printf("\n");
 
     const bool truncated = flags->truncated;
     free(flags);
