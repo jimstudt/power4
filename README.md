@@ -1,8 +1,13 @@
 # power4
 
-`power4` is firmware for a Waveshare ESP32-S3-Relay-6CH used as a configurable
-power controller. The controller is intended to run unattended for years while
-making relay decisions from battery state data and a site-specific policy.
+`power4` is firmware for Waveshare ESP32-S3 relay controllers used as
+configurable power controllers. One firmware image supports:
+
+- `relay-6ch`: Waveshare ESP32-S3-Relay-6CH
+- `poe-8ro`: Waveshare ESP32-S3-POE-ETH-8DI-8RO
+
+The controller is intended to run unattended for years while making relay
+decisions from battery state data and a site-specific policy.
 It monitors battery state by scanning for JBD BMS advertisements over BLE and
 uses that data as input to a Lua policy program that drives the relay outputs.
 
@@ -19,7 +24,7 @@ Common targets:
 ```sh
 make build        # build ESP32 firmware
 make package      # build firmware bundle for Raspberry Pi deployment
-make flash        # flash firmware over USB
+make flash BOARD=relay-6ch  # flash firmware and the selected board profile
 make monitor      # open ESP-IDF serial monitor
 make menuconfig   # open ESP-IDF configuration UI
 make clean        # remove build outputs
@@ -46,7 +51,14 @@ The default serial port is `/dev/tty.usbmodem1101` and can be overridden with
 `PORT`:
 
 ```sh
-make PORT=/dev/tty.usbmodem1101 flash monitor
+make PORT=/dev/tty.usbmodem1101 BOARD=relay-6ch flash monitor
+```
+
+Flashing requires a board name so the correct hardware profile is written:
+
+```sh
+make PORT=/dev/tty.usbmodem1101 flash BOARD=relay-6ch
+make PORT=/dev/tty.usbmodem1101 flash BOARD=poe-8ro
 ```
 
 To build a firmware bundle for installation from a Raspberry Pi or another
@@ -70,7 +82,8 @@ sudo apt install esptool picocom
 After unpacking the bundle on the Pi:
 
 ```sh
-PORT=/dev/ttyACM0 ./flash.sh
+PORT=/dev/ttyACM0 ./flash.sh relay-6ch
+PORT=/dev/ttyACM0 ./flash.sh poe-8ro
 PORT=/dev/ttyACM0 ./monitor.sh
 ```
 
@@ -80,36 +93,41 @@ Project configuration is handled through ESP-IDF Kconfig settings. Defaults live
 in `sdkconfig.defaults`; the active generated configuration lives in
 `sdkconfig`. Use `make menuconfig` to inspect or change settings interactively.
 
-Relay hardware configuration is board-specific:
+Board hardware configuration is separate from normal settings. It lives in the
+read-only `board_config` NVS partition at flash offset `0x1a000`; the profile
+CSV sources are in `board_profiles/`. The selected profile describes relay
+count and backend, digital inputs, I2C, Ethernet, and RTC hardware. The
+application image is identical for both boards.
+
+The shipped profiles are:
+
+| Profile | Relays | Digital inputs | Ethernet | RTC |
+| --- | --- | --- | --- | --- |
+| `relay-6ch` | Six active-high GPIO outputs: 1, 2, 41, 42, 45, 46 | None | None | None |
+| `poe-8ro` | Eight active-high TCA9554 outputs, bits 0–7 at I2C address `0x20` | Eight active-low GPIO inputs: 4–11, with pull-ups | W5500 over SPI | PCF85063A at I2C address `0x51` |
+
+If the profile partition is missing, unreadable, or invalid, firmware starts
+the USB console but does not start relay control, BLE scanning, or policy
+execution. This fail-closed behavior prevents an unknown board layout from
+energizing an output.
+
+Normal capacity and scanner settings remain in Kconfig:
 
 ```text
-CONFIG_POWER4_RELAY_COUNT=6
-CONFIG_POWER4_RELAY_GPIO_MAP="1,2,41,42,45,46"
-CONFIG_POWER4_RELAY_ACTIVE_LEVEL=1
+CONFIG_POWER4_MAX_RELAYS=8
 CONFIG_POWER4_MAX_BATTERIES=16
 CONFIG_POWER4_MAX_BANKS=4
 CONFIG_POWER4_BATTERY_SCAN_PERIOD_SECONDS=60
 CONFIG_POWER4_BATTERY_SCAN_DURATION_SECONDS=10
+CONFIG_ESP_SYSTEM_EVENT_TASK_STACK_SIZE=4096
 ```
 
-`CONFIG_POWER4_RELAY_COUNT` is the number of relay outputs managed by the relay
-manager.
+`CONFIG_POWER4_MAX_RELAYS` sizes bounded firmware storage. It must be at least
+as large as the relay count in every supported board profile.
 
-`CONFIG_POWER4_RELAY_GPIO_MAP` is a comma-separated list of GPIO numbers in
-relay-channel order. The first entry is relay 1, the second entry is relay 2,
-and so on. The default map is for the Waveshare ESP32-S3-Relay-6CH:
-
-```text
-relay 1 -> GPIO 1
-relay 2 -> GPIO 2
-relay 3 -> GPIO 41
-relay 4 -> GPIO 42
-relay 5 -> GPIO 45
-relay 6 -> GPIO 46
-```
-
-`CONFIG_POWER4_RELAY_ACTIVE_LEVEL` is the GPIO level that energizes a relay.
-Use `1` for active-high relay drivers and `0` for active-low relay drivers.
+`CONFIG_ESP_SYSTEM_EVENT_TASK_STACK_SIZE` is raised above the ESP-IDF default
+because Ethernet DHCP/IP event processing and firmware log capture share the
+`sys_evt` task stack.
 
 `CONFIG_POWER4_MAX_BATTERIES` is the maximum number of named batteries kept in
 the in-memory observation table. If a new battery is observed when the table is
@@ -123,8 +141,9 @@ NVS.
 scanner. The scanner currently looks for JBD BMS advertisements that expose the
 `0xFF00` service used with `0xFF01` and `0xFF02` characteristics.
 
-For another board, change the relay count, GPIO map, and active level in
-`sdkconfig.defaults`, then regenerate or edit `sdkconfig` and rebuild.
+To add another board, add a versioned profile CSV, extend the supported-board
+list in the Makefile/CMake validation, and implement any new bounded hardware
+backend required by that profile.
 
 ## Console
 
@@ -169,11 +188,16 @@ show relays
 show ble
 show batteries
 show banks
+show board
+show ethernet
+show inputs
+show password
 show policy
 show policy staged
 show policy parameters
 show debug
 show logs
+show time
 ```
 
 `show logs` prints the most recent system log text, kept in a 16 KB rolling
@@ -202,16 +226,54 @@ System command examples:
 reboot
 ```
 
-Volatile setting examples:
+Setting examples:
 
 ```text
 set debug ble_scanner on
 set debug ble_scanner off
+set ethernet dhcp
+set ethernet static 192.168.10.20 255.255.255.0 192.168.10.1
+set ethernet static 192.168.10.20 255.255.255.0 192.168.10.1 1.1.1.1 8.8.8.8
+set ethernet phy auto
+set ethernet phy 10-full
+set password
+set password "a manually chosen password"
 set relay 1 on 30
 set relay 1 force-on
 set relay 1 force-off
 set relay 1 clear-force
+set time 2026-07-29 14:30:00
 ```
+
+Ethernet address and PHY settings are stored in the normal writable NVS
+partition and applied immediately. Addressing may be DHCP or static IPv4. PHY
+modes are `auto`, `10-half`, `10-full`, `100-half`, and `100-full`. Ethernet
+commands report `not present` on the 6-channel board.
+
+`set password` with no argument generates a 43-character base64url password
+from 32 random bytes, saves it in NVS, and prints it. Supplying an argument
+sets that 16–128 byte printable password instead. `show password` reveals the
+stored value. Both password commands and all `set ethernet` commands are
+restricted to the physical serial console.
+
+On Ethernet boards, an authenticated TCP console listens on IPv4 port 4244.
+The server sends a random `authenticate` challenge, and the client proves it
+knows the password with HMAC-SHA256. After authentication, the session is
+clear text and also accepts ordinary human console commands. Commands issued
+by `power4ctl` use the tool framing described below. A connection has a
+five-second authentication/input timeout, a two-second send timeout, a
+15-second total command-I/O deadline, and a 60-second idle timeout so a failed
+network client cannot hold the command processor indefinitely.
+
+`show inputs` reports the raw GPIO level and logical on/off state for every
+configured digital input. Boards without digital inputs report `not present`.
+Inputs are sampled when requested; firmware does not currently debounce them
+or attach actions directly to input edges.
+
+The RTC commands use local wall time and do not apply a timezone conversion.
+`show time` reports an oscillator-stopped condition instead of silently
+treating an uninitialized clock as valid. Lua policy can read the RTC, but
+there are not yet any built-in time-of-day predicates.
 
 A forced relay ignores its policy timer: `force-off` keeps the relay open no
 matter what policy does (for example, while working on wiring) and `force-on`
@@ -304,6 +366,8 @@ relay_on(1)   -- keep relay 1 on for 300 seconds
 relay_on(1, 3600) -- keep relay 1 on for an hour (1..86400 seconds)
 relay_off(1)  -- clear relay 1's policy timer
 on, force, remaining = relay_state(1) -- output state, force ("on"/"off"/nil), timer seconds left
+input_on(1) -- true when configured digital input 1 is asserted
+now = rtc_time() -- table: year, month, day, weekday (0=Sunday), hour, minute, second, valid, oscillator_stopped
 config_is_set("generator_ok") -- true only when defined true
 config_bool("allow-generator", true) -- boolean parameter, or the default (nil if omitted) when unset
 config_number("b24_low_limit", 40) -- numeric parameter, or the default (nil if omitted) when unset
@@ -312,6 +376,11 @@ syslog("policy reached generator_ok check") -- emit through ESP logging
 ready, volts, amps, soc = battery_bank_state("house")
 names = battery_bank_names()
 ```
+
+`input_on()` raises a policy error when the requested input is not configured.
+`rtc_time()` raises a policy error when the RTC is absent or cannot be read.
+When the RTC can be read but has reported an oscillator stop, the returned
+table has `valid=false` and `oscillator_stopped=true`.
 
 Policy program command examples:
 
@@ -394,10 +463,16 @@ can read relay states, read config flags, and set or unset config flags.
 ## power4ctl
 
 `power4ctl` is the host-side management tool for the controller. It lives under
-`power4ctl/` and is built independently of ESP-IDF. It connects to the device
-over the serial console, elicits the `power4>` prompt, issues a command, and
-returns the result — all with a timeout and exclusive locking so concurrent
-invocations do not collide.
+`power4ctl/` and is built independently of ESP-IDF. It connects over USB serial
+or the authenticated TCP console, elicits the `power4>` prompt, issues a
+tool-framed command, and returns the result.
+
+For both transports, the tool sends `p4exec <command>`. Firmware streams the
+command output without accumulating a complete response, doubles a leading
+dot on any output line, and terminates the response with `.` on a line by
+itself. `power4ctl` removes the dot stuffing and does not use the interactive
+prompt as an end-of-response marker. Direct human console commands remain
+unchanged.
 
 ### Building
 
@@ -429,12 +504,15 @@ sudo dpkg -i power4ctl/power4ctl_1.0.1_arm64.deb
 ### Usage
 
 ```text
-power4ctl [-p port] [-b baud] [-t seconds] [-v] command [args...]
-power4ctl [-p port] [-b baud] [-t seconds] [-v]
-power4ctl [-p port] [-b baud] [-t seconds] [-v] -D [-i interval] [-l lock-seconds] [-o outdir]
+power4ctl [-p port | -a address (-e name | -f file)] [-b baud] [-t seconds] [-v] command [args...]
+power4ctl [-p port | -a address (-e name | -f file)] [-b baud] [-t seconds] [-v]
+power4ctl [-p port | -a address (-e name | -f file)] [-b baud] [-t seconds] [-v] -D [-i interval] [-l lock-seconds] [-o outdir]
 
 Options:
   -p port          serial port  (default: /dev/ttyACM0)
+  -a address       use authenticated TCP console at IPv4 address
+  -e name          read TCP password from environment variable name
+  -f file          read TCP password from file, trimming whitespace
   -b baud          baud rate    (default: 115200)
   -t seconds       timeout per operation  (default: 2)
   -v               verbose: log bytes sent/received to stderr
@@ -465,9 +543,9 @@ and report the device's confirmation:
 power4ctl stage policy.lua
 ```
 
-**Passthrough** — any unrecognized command is sent verbatim to the device and
-all output lines are echoed to stdout until the `power4>` prompt returns. This
-provides full console access without a separate terminal emulator:
+**Passthrough** — any unrecognized command is wrapped as a tool command and
+its dot-framed output is echoed to stdout. This provides full console access
+without a separate terminal emulator:
 
 ```sh
 power4ctl show system
@@ -475,6 +553,21 @@ power4ctl set relay 1 on 30
 power4ctl policy accept
 power4ctl help
 ```
+
+TCP examples:
+
+```sh
+POWER4_PASSWORD='the password shown by set password'
+export POWER4_PASSWORD
+power4ctl -a 10.10.10.163 -e POWER4_PASSWORD show relays
+
+power4ctl -a 10.10.10.163 -f /etc/power4/password json batteries
+```
+
+Exactly one password source is required with `-a`. Environment values are
+used exactly; password files have leading and trailing whitespace removed.
+Authentication protects access to the session, but commands and responses
+after login are clear text on the LAN.
 
 **Interactive REPL** — invoked with no command, enters a line-editing shell
 (powered by libedit) with Emacs key bindings and persistent command history
@@ -485,6 +578,7 @@ released before the next prompt, so other tools can interleave. Type `exit`,
 ```sh
 power4ctl
 power4ctl -p /dev/ttyACM1
+power4ctl -a 10.10.10.163 -f ~/.config/power4/password
 ```
 
 **Daemon mode** — run indefinitely, polling the device every 60 seconds and
@@ -498,15 +592,17 @@ content. If the port is held by another process the cycle is skipped (up to
 ```sh
 power4ctl -D
 power4ctl -D -i 30 -l 10 -o /var/lib/power4
+power4ctl -a 10.10.10.163 -f /etc/power4/password -D
 ```
 
 ### Locking
 
-`power4ctl` uses `flock(LOCK_EX|LOCK_NB)` and `TIOCEXCL` immediately after
-opening the port. In single-shot mode, if another process already holds the
-port the tool exits immediately with an error. In daemon mode the lock attempt
-is retried every 500 ms for up to the lock-wait timeout before the cycle is
-skipped.
+For serial connections, `power4ctl` uses `flock(LOCK_EX|LOCK_NB)` and
+`TIOCEXCL` immediately after opening the port. In single-shot mode, if another
+process already holds the port the tool exits immediately with an error. In
+daemon mode the lock attempt is retried every 500 ms for up to the lock-wait
+timeout before the cycle is skipped. TCP sessions rely on the firmware's
+single authenticated session and command serialization.
 
 ## Example Policy
 

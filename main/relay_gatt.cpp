@@ -23,9 +23,9 @@ struct RelayCharacteristicArg {
 };
 
 ble_uuid128_t g_service_uuid = {};
-ble_uuid128_t g_relay_uuids[CONFIG_POWER4_RELAY_COUNT] = {};
-RelayCharacteristicArg g_relay_args[CONFIG_POWER4_RELAY_COUNT] = {};
-ble_gatt_chr_def g_characteristics[CONFIG_POWER4_RELAY_COUNT + 1] = {};
+ble_uuid128_t g_relay_uuids[CONFIG_POWER4_MAX_RELAYS] = {};
+RelayCharacteristicArg g_relay_args[CONFIG_POWER4_MAX_RELAYS] = {};
+ble_gatt_chr_def g_characteristics[CONFIG_POWER4_MAX_RELAYS + 1] = {};
 ble_gatt_svc_def g_services[2] = {};
 bool g_registered = false;
 

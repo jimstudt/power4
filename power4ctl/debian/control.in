@@ -5,8 +5,7 @@ Maintainer: Jim Studt <jim@studt.net>
 Depends: libc6, libedit2
 Section: utils
 Priority: optional
-Description: Serial management tool for the power4 ESP32 device
+Description: Serial and authenticated TCP management tool for power4
  Command-line tool for querying and managing a power4 ESP32 controller
- over its serial console. Supports JSON state reports for batteries,
- battery banks, and relays, policy program upload, and general-purpose
- passthrough access to the device console.
+ over its serial or authenticated TCP console. Supports JSON state reports,
+ policy program upload, and general-purpose passthrough access.

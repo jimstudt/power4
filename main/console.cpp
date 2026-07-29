@@ -12,13 +12,18 @@
 #include "battery_bank.hpp"
 #include "battery_scanner.hpp"
 #include "battery_store.hpp"
+#include "board_config.hpp"
 #include "checksum.hpp"
 #include "config_flags.hpp"
+#include "ethernet_manager.hpp"
+#include "input_manager.hpp"
 #include "json_output.hpp"
 #include "log_buffer.hpp"
 #include "policy_storage.hpp"
 #include "policy_task.hpp"
 #include "relay_manager.hpp"
+#include "rtc_manager.hpp"
+#include "network_console.hpp"
 #include "esp_app_desc.h"
 #include "esp_chip_info.h"
 #include "esp_console.h"
@@ -42,6 +47,7 @@
 #include "driver/usb_serial_jtag_vfs.h"
 #endif
 #include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "mbedtls/base64.h"
 #include "sdkconfig.h"
@@ -58,7 +64,7 @@ namespace {
 constexpr const char *kTag = "power4_console";
 constexpr const char *kPrompt = "power4> ";
 constexpr size_t kRelayStateJsonBaseBytes = 96;
-constexpr size_t kRelayStateJsonBytesPerRelay = 160;
+constexpr size_t kRelayStateJsonBytesPerRelay = 224;
 constexpr size_t kBatteryStateJsonBaseBytes = 96;
 constexpr size_t kBatteryStateJsonBytesPerBattery = 256;
 constexpr size_t kBankStateJsonBaseBytes = 96;
@@ -75,12 +81,24 @@ constexpr size_t kPolicyUploadLineBytes = 160;
 constexpr size_t kConsoleLineBytes = 256;
 constexpr uint32_t kConsoleTaskStackBytes = 8192;
 constexpr UBaseType_t kConsoleTaskPriority = 4;
+constexpr TickType_t kCommandMutexTimeoutTicks = pdMS_TO_TICKS(2000);
+constexpr char kToolCommandPrefix[] = "p4exec ";
 
 portMUX_TYPE g_console_line_mux = portMUX_INITIALIZER_UNLOCKED;
 char g_console_line[kConsoleLineBytes] = {};
 size_t g_console_line_length = 0;
 bool g_console_prompt_active = false;
 vprintf_like_t g_previous_log_vprintf = nullptr;
+StaticSemaphore_t g_command_mutex_storage = {};
+SemaphoreHandle_t g_command_mutex = nullptr;
+Power4CommandSource g_command_source = Power4CommandSource::Serial;
+TaskHandle_t g_capture_task = nullptr;
+esp_timer_handle_t g_reboot_timer = nullptr;
+
+struct DotStuffStream {
+    FILE *destination;
+    bool line_start;
+};
 
 int bank_show_command(void);
 int ble_show_command(void);
@@ -220,6 +238,11 @@ bool consume_escape_sequence(char ch, EscapeState *state)
 
 int console_log_vprintf(const char *format, va_list args)
 {
+    if (g_capture_task == xTaskGetCurrentTaskHandle()) {
+        return g_previous_log_vprintf != nullptr ? g_previous_log_vprintf(format, args)
+                                                 : vprintf(format, args);
+    }
+
     char line[kConsoleLineBytes] = {};
     size_t length = 0;
     bool prompt_active = false;
@@ -244,6 +267,57 @@ int console_log_vprintf(const char *format, va_list args)
     return result;
 }
 
+void reboot_timer_callback(void *)
+{
+    esp_restart();
+}
+
+int dot_stuff_write(void *cookie, const char *buffer, int length)
+{
+    auto *stream = static_cast<DotStuffStream *>(cookie);
+    size_t run_start = 0;
+    for (int i = 0; i < length; ++i) {
+        if (stream->line_start && buffer[i] == '.') {
+            const size_t run_length = static_cast<size_t>(i) - run_start;
+            if (run_length > 0 &&
+                fwrite(buffer + run_start, 1, run_length, stream->destination) !=
+                    run_length) {
+                return -1;
+            }
+            if (fwrite(".", 1, 1, stream->destination) != 1) {
+                return -1;
+            }
+            run_start = static_cast<size_t>(i);
+        }
+        stream->line_start = buffer[i] == '\n';
+    }
+
+    const size_t remaining = static_cast<size_t>(length) - run_start;
+    if (remaining > 0 &&
+        fwrite(buffer + run_start, 1, remaining, stream->destination) != remaining) {
+        return -1;
+    }
+    return length;
+}
+
+bool finish_dot_stuffed_response(DotStuffStream *stream)
+{
+    if (!stream->line_start && fwrite("\n", 1, 1, stream->destination) != 1) {
+        return false;
+    }
+    return fwrite(".\n", 1, 2, stream->destination) == 2 &&
+           fflush(stream->destination) == 0;
+}
+
+void write_console_busy_frame(FILE *destination)
+{
+    if (destination == nullptr) {
+        return;
+    }
+    fputs("console busy; try again\n.\n", destination);
+    fflush(destination);
+}
+
 bool parse_relay(const char *text, uint8_t *relay)
 {
     uint32_t parsed = 0;
@@ -257,9 +331,15 @@ bool parse_relay(const char *text, uint8_t *relay)
 
 void print_relay_status(const RelayStatus &status)
 {
-    printf("relay %u: gpio=%d active_level=%u output=%s timer=%s",
+    printf("relay %u: backend=%s ",
            status.relay,
-           status.gpio_pin,
+           relay_backend_name(status.backend));
+    if (status.backend == RelayBackendKind::Gpio) {
+        printf("gpio=%d ", status.gpio_pin);
+    } else if (status.backend == RelayBackendKind::Tca9554) {
+        printf("exio=%d ", status.hardware_channel + 1);
+    }
+    printf("active_level=%u output=%s timer=%s",
            status.active_level,
            status.output_on ? "on" : "off",
            status.timer_active ? "on" : "off");
@@ -284,6 +364,11 @@ int query_and_print_relay(uint8_t relay)
 
 int print_all_relays(void)
 {
+    if (relay_manager_count() == 0) {
+        printf("relays: unavailable\n");
+        return 1;
+    }
+
     int result = 0;
     for (uint8_t relay = 1; relay <= relay_manager_count(); ++relay) {
         result |= query_and_print_relay(relay);
@@ -370,13 +455,18 @@ void print_show_usage(void)
     printf("  show batteries\n");
     printf("  show banks\n");
     printf("  show ble\n");
+    printf("  show board\n");
     printf("  show debug\n");
+    printf("  show ethernet\n");
+    printf("  show inputs\n");
     printf("  show logs\n");
+    printf("  show password\n");
     printf("  show policy\n");
     printf("  show policy parameters\n");
     printf("  show policy staged\n");
     printf("  show relays\n");
     printf("  show system\n");
+    printf("  show time\n");
 }
 
 int show_batteries_command(void)
@@ -452,6 +542,227 @@ int show_debug_command(void)
     return 0;
 }
 
+int show_board_command(void)
+{
+    const BoardConfig *board = board_config_get();
+    if (board == nullptr) {
+        printf("board: unavailable (%s)\n", board_config_error());
+        return 1;
+    }
+
+    printf("board: profile=%s model=\"%s\" schema=%u\n",
+           board->profile,
+           board->model,
+           board->schema_version);
+    printf("relays: backend=%s count=%u active_level=%u channels=",
+           relay_backend_name(board->relay.kind),
+           board->relay.count,
+           board->relay.active_level);
+    for (uint8_t i = 0; i < board->relay.count; ++i) {
+        printf("%s%d", i == 0 ? "" : ",", board->relay.channels[i]);
+    }
+    if (board->relay.kind == RelayBackendKind::Tca9554) {
+        printf(" address=0x%02x", board->relay.i2c_address);
+    }
+    printf("\n");
+
+    if (board->i2c.present) {
+        printf("i2c: port=%d sda=%d scl=%d frequency=%" PRIu32 "\n",
+               board->i2c.port,
+               board->i2c.sda_gpio,
+               board->i2c.scl_gpio,
+               board->i2c.frequency_hz);
+    } else {
+        printf("i2c: none\n");
+    }
+
+    if (board->ethernet.kind == EthernetHardwareKind::W5500) {
+        printf("ethernet: hardware=%s spi_host=%d mosi=%d miso=%d sclk=%d "
+               "cs=%d interrupt=%d reset=%d phy_address=%u frequency=%" PRIu32 "\n",
+               ethernet_hardware_name(board->ethernet.kind),
+               board->ethernet.spi_host,
+               board->ethernet.mosi_gpio,
+               board->ethernet.miso_gpio,
+               board->ethernet.sclk_gpio,
+               board->ethernet.cs_gpio,
+               board->ethernet.interrupt_gpio,
+               board->ethernet.reset_gpio,
+               board->ethernet.phy_address,
+               board->ethernet.spi_frequency_hz);
+    } else {
+        printf("ethernet: none\n");
+    }
+
+    if (board->rtc.kind != RtcHardwareKind::None) {
+        printf("rtc: hardware=%s address=0x%02x\n",
+               rtc_hardware_name(board->rtc.kind),
+               board->rtc.i2c_address);
+    } else {
+        printf("rtc: none\n");
+    }
+
+    if (board->digital_input.kind == DigitalInputBackendKind::Gpio) {
+        printf("inputs: backend=%s count=%u active_level=%u pull=%s channels=",
+               digital_input_backend_name(board->digital_input.kind),
+               board->digital_input.count,
+               board->digital_input.active_level,
+               gpio_pull_name(board->digital_input.pull));
+        for (uint8_t i = 0; i < board->digital_input.count; ++i) {
+            printf("%s%d", i == 0 ? "" : ",", board->digital_input.channels[i]);
+        }
+        printf("\n");
+    } else {
+        printf("inputs: none\n");
+    }
+    return 0;
+}
+
+const char *format_ip(const esp_ip4_addr_t &address, char *buffer, size_t capacity)
+{
+    if (esp_ip4addr_ntoa(&address, buffer, static_cast<int>(capacity)) == nullptr) {
+        strlcpy(buffer, "invalid", capacity);
+    }
+    return buffer;
+}
+
+int show_ethernet_command(void)
+{
+    EthernetStatus status = {};
+    const esp_err_t err = ethernet_manager_get_status(&status);
+    if (err != ESP_OK) {
+        printf("show ethernet failed: %s\n", esp_err_to_name(err));
+        return 1;
+    }
+    if (!status.present) {
+        printf("ethernet: not present\n");
+        return 0;
+    }
+    if (!status.initialized) {
+        printf("ethernet: unavailable (%s)\n", esp_err_to_name(status.last_error));
+        return 1;
+    }
+
+    printf("ethernet: address=%s phy=%s link=%s",
+           ethernet_address_mode_name(status.settings.address_mode),
+           ethernet_phy_mode_name(status.settings.phy_mode),
+           status.link_up ? "up" : "down");
+    if (status.link_up) {
+        printf(" speed=%uMbps duplex=%s",
+               status.speed_mbps,
+               status.full_duplex ? "full" : "half");
+    }
+    printf("\n");
+    printf("mac: %02x:%02x:%02x:%02x:%02x:%02x\n",
+           status.mac[0],
+           status.mac[1],
+           status.mac[2],
+           status.mac[3],
+           status.mac[4],
+           status.mac[5]);
+
+    char ip[16] = {};
+    char netmask[16] = {};
+    char gateway[16] = {};
+    char dns1[16] = {};
+    char dns2[16] = {};
+    if (status.settings.address_mode == EthernetAddressMode::Static) {
+        printf("configured: ip=%s netmask=%s gateway=%s dns1=%s dns2=%s\n",
+               format_ip(status.settings.ip, ip, sizeof(ip)),
+               format_ip(status.settings.netmask, netmask, sizeof(netmask)),
+               format_ip(status.settings.gateway, gateway, sizeof(gateway)),
+               format_ip(status.settings.dns1, dns1, sizeof(dns1)),
+               format_ip(status.settings.dns2, dns2, sizeof(dns2)));
+    }
+    printf("current: ip=%s netmask=%s gateway=%s dns1=%s dns2=%s\n",
+           format_ip(status.current_ip.ip, ip, sizeof(ip)),
+           format_ip(status.current_ip.netmask, netmask, sizeof(netmask)),
+           format_ip(status.current_ip.gw, gateway, sizeof(gateway)),
+           format_ip(status.current_dns1.ip.u_addr.ip4, dns1, sizeof(dns1)),
+           format_ip(status.current_dns2.ip.u_addr.ip4, dns2, sizeof(dns2)));
+    return 0;
+}
+
+const char *weekday_name(uint8_t weekday)
+{
+    static constexpr const char *kWeekdays[] = {
+        "Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday",
+    };
+    return weekday < 7 ? kWeekdays[weekday] : "invalid";
+}
+
+int show_time_command(void)
+{
+    RtcStatus status = {};
+    esp_err_t err = rtc_manager_get_status(&status);
+    if (err != ESP_OK) {
+        printf("show time failed: %s\n", esp_err_to_name(err));
+        return 1;
+    }
+    if (!status.present) {
+        printf("time: RTC not present\n");
+        return 0;
+    }
+    if (!status.initialized) {
+        printf("time: RTC unavailable (%s)\n", esp_err_to_name(status.initialization_result));
+        return 1;
+    }
+
+    RtcDateTime value = {};
+    err = rtc_manager_read(&value);
+    if (err != ESP_OK) {
+        printf("show time failed: %s\n", esp_err_to_name(err));
+        return 1;
+    }
+    printf("time: %04u-%02u-%02u %02u:%02u:%02u local %s status=%s\n",
+           value.year,
+           value.month,
+           value.day,
+           value.hour,
+           value.minute,
+           value.second,
+           weekday_name(value.weekday),
+           value.oscillator_stopped ? "oscillator-stopped" : "valid");
+    return value.oscillator_stopped ? 1 : 0;
+}
+
+int show_inputs_command(void)
+{
+    InputManagerStatus manager = {};
+    esp_err_t err = input_manager_get_status(&manager);
+    if (err != ESP_OK) {
+        printf("show inputs failed: %s\n", esp_err_to_name(err));
+        return 1;
+    }
+    if (!manager.present) {
+        printf("inputs: not present\n");
+        return 0;
+    }
+    if (!manager.initialized) {
+        printf("inputs: unavailable (%s)\n", esp_err_to_name(manager.initialization_result));
+        return 1;
+    }
+
+    printf("inputs: count=%u\n", manager.count);
+    int result = 0;
+    for (uint8_t input = 1; input <= manager.count; ++input) {
+        InputStatus status = {};
+        err = input_manager_query(input, &status);
+        if (err != ESP_OK) {
+            printf("input %u: error=%s\n", input, esp_err_to_name(err));
+            result = 1;
+            continue;
+        }
+        printf("input %u: backend=%s gpio=%d active_level=%u level=%d state=%s\n",
+               status.input,
+               digital_input_backend_name(status.backend),
+               status.gpio_pin,
+               status.active_level,
+               status.level,
+               status.on ? "on" : "off");
+    }
+    return result;
+}
+
 int show_command(int argc, char **argv)
 {
     if (argc < 2 || strcmp(argv[1], "help") == 0) {
@@ -483,12 +794,59 @@ int show_command(int argc, char **argv)
         return ble_show_command();
     }
 
+    if (strcmp(argv[1], "board") == 0) {
+        if (argc != 2) {
+            print_show_usage();
+            return 1;
+        }
+        return show_board_command();
+    }
+
     if (strcmp(argv[1], "debug") == 0) {
         if (argc != 2) {
             print_show_usage();
             return 1;
         }
         return show_debug_command();
+    }
+
+    if (strcmp(argv[1], "ethernet") == 0) {
+        if (argc != 2) {
+            print_show_usage();
+            return 1;
+        }
+        return show_ethernet_command();
+    }
+
+    if (strcmp(argv[1], "password") == 0) {
+        if (argc != 2) {
+            print_show_usage();
+            return 1;
+        }
+        if (g_command_source == Power4CommandSource::Tcp) {
+            printf("show password denied: serial console only\n");
+            return 1;
+        }
+
+        char password[129] = {};
+        bool configured = false;
+        const esp_err_t err =
+            network_console_password_get(password, sizeof(password), &configured);
+        if (err != ESP_OK) {
+            printf("show password failed: %s\n", esp_err_to_name(err));
+            return 1;
+        }
+        printf("password: %s\n", configured ? password : "not configured");
+        memset(password, 0, sizeof(password));
+        return 0;
+    }
+
+    if (strcmp(argv[1], "inputs") == 0) {
+        if (argc != 2) {
+            print_show_usage();
+            return 1;
+        }
+        return show_inputs_command();
     }
 
     if (strcmp(argv[1], "policy") == 0) {
@@ -528,6 +886,14 @@ int show_command(int argc, char **argv)
             return 1;
         }
         return system_command(argc, argv);
+    }
+
+    if (strcmp(argv[1], "time") == 0) {
+        if (argc != 2) {
+            print_show_usage();
+            return 1;
+        }
+        return show_time_command();
     }
 
     print_show_usage();
@@ -748,10 +1114,75 @@ void print_set_usage(void)
     printf("usage:\n");
     printf("  set debug ble_scanner on\n");
     printf("  set debug ble_scanner off\n");
+    printf("  set ethernet dhcp\n");
+    printf("  set ethernet static <ip> <netmask> <gateway> [dns1] [dns2]\n");
+    printf("  set ethernet phy auto|10-half|10-full|100-half|100-full\n");
+    printf("  set password [password]\n");
     printf("  set relay <relay> on [seconds]\n");
     printf("  set relay <relay> force-on\n");
     printf("  set relay <relay> force-off\n");
     printf("  set relay <relay> clear-force\n");
+    printf("  set time YYYY-MM-DD HH:MM:SS\n");
+}
+
+bool parse_rtc_datetime(const char *date_text, const char *time_text, RtcDateTime *value)
+{
+    if (date_text == nullptr || time_text == nullptr || value == nullptr) {
+        return false;
+    }
+    if (strlen(date_text) != 10 ||
+        date_text[4] != '-' ||
+        date_text[7] != '-' ||
+        strlen(time_text) != 8 ||
+        time_text[2] != ':' ||
+        time_text[5] != ':') {
+        return false;
+    }
+
+    unsigned year = 0;
+    unsigned month = 0;
+    unsigned day = 0;
+    unsigned hour = 0;
+    unsigned minute = 0;
+    unsigned second = 0;
+    int date_chars = 0;
+    int time_chars = 0;
+    if (sscanf(date_text,
+               "%u-%u-%u%n",
+               &year,
+               &month,
+               &day,
+               &date_chars) != 3 ||
+        date_text[date_chars] != '\0' ||
+        sscanf(time_text,
+               "%u:%u:%u%n",
+               &hour,
+               &minute,
+               &second,
+               &time_chars) != 3 ||
+        time_text[time_chars] != '\0' ||
+        year > UINT16_MAX ||
+        month > UINT8_MAX ||
+        day > UINT8_MAX ||
+        hour > UINT8_MAX ||
+        minute > UINT8_MAX ||
+        second > UINT8_MAX) {
+        return false;
+    }
+
+    RtcDateTime parsed = {};
+    parsed.year = static_cast<uint16_t>(year);
+    parsed.month = static_cast<uint8_t>(month);
+    parsed.day = static_cast<uint8_t>(day);
+    parsed.hour = static_cast<uint8_t>(hour);
+    parsed.minute = static_cast<uint8_t>(minute);
+    parsed.second = static_cast<uint8_t>(second);
+    if (!rtc_datetime_valid(parsed)) {
+        return false;
+    }
+    parsed.weekday = rtc_weekday(parsed.year, parsed.month, parsed.day);
+    *value = parsed;
+    return true;
 }
 
 int set_command(int argc, char **argv)
@@ -771,6 +1202,63 @@ int set_command(int argc, char **argv)
         battery_scanner_set_verbose(enabled);
         printf("debug ble_scanner %s\n", battery_scanner_verbose_enabled() ? "on" : "off");
         return 0;
+    }
+
+    if (strcmp(argv[1], "password") == 0) {
+        if (g_command_source == Power4CommandSource::Tcp) {
+            printf("set password denied: serial console only\n");
+            return 1;
+        }
+        if (argc < 2 || argc > 3) {
+            print_set_usage();
+            return 1;
+        }
+
+        char generated[129] = {};
+        const esp_err_t err =
+            argc == 2 ? network_console_password_generate(generated, sizeof(generated))
+                      : network_console_password_set(argv[2]);
+        if (err != ESP_OK) {
+            printf("set password failed: %s\n", esp_err_to_name(err));
+            memset(generated, 0, sizeof(generated));
+            return 1;
+        }
+        printf("password: %s\n", argc == 2 ? generated : argv[2]);
+        memset(generated, 0, sizeof(generated));
+        return 0;
+    }
+
+    if (strcmp(argv[1], "ethernet") == 0) {
+        if (g_command_source == Power4CommandSource::Tcp) {
+            printf("set ethernet denied: serial console only\n");
+            return 1;
+        }
+        esp_err_t err = ESP_ERR_INVALID_ARG;
+        if (argc == 3 && strcmp(argv[2], "dhcp") == 0) {
+            err = ethernet_manager_set_dhcp();
+        } else if (argc >= 6 && argc <= 8 && strcmp(argv[2], "static") == 0) {
+            err = ethernet_manager_set_static(argv[3],
+                                              argv[4],
+                                              argv[5],
+                                              argc >= 7 ? argv[6] : nullptr,
+                                              argc >= 8 ? argv[7] : nullptr);
+        } else if (argc == 4 && strcmp(argv[2], "phy") == 0) {
+            EthernetPhyMode mode = EthernetPhyMode::Auto;
+            if (!ethernet_phy_mode_parse(argv[3], &mode)) {
+                print_set_usage();
+                return 1;
+            }
+            err = ethernet_manager_set_phy(mode);
+        } else {
+            print_set_usage();
+            return 1;
+        }
+
+        if (err != ESP_OK) {
+            printf("set ethernet failed: %s\n", esp_err_to_name(err));
+            return 1;
+        }
+        return show_ethernet_command();
     }
 
     if (strcmp(argv[1], "relay") == 0) {
@@ -835,6 +1323,20 @@ int set_command(int argc, char **argv)
 
         print_set_usage();
         return 1;
+    }
+
+    if (strcmp(argv[1], "time") == 0) {
+        RtcDateTime value = {};
+        if (argc != 4 || !parse_rtc_datetime(argv[2], argv[3], &value)) {
+            print_set_usage();
+            return 1;
+        }
+        const esp_err_t err = rtc_manager_set(value);
+        if (err != ESP_OK) {
+            printf("set time failed: %s\n", esp_err_to_name(err));
+            return 1;
+        }
+        return show_time_command();
     }
 
     print_set_usage();
@@ -1107,11 +1609,14 @@ int report_relays_command(void)
         ok = append_json(json,
                          capacity,
                          &used,
-                         "%s{\"id\":%u,\"gpio\":%d,\"active_level\":%u,"
+                         "%s{\"id\":%u,\"backend\":\"%s\",\"hardware_channel\":%d,"
+                         "\"gpio\":%d,\"active_level\":%u,"
                          "\"output_on\":%s,\"timer_active\":%s,"
                          "\"timer_remaining_s\":%" PRIu32 ",\"force\":\"%s\"}",
                          relay == 1 ? "" : ",",
                          status.relay,
+                         relay_backend_name(status.backend),
+                         status.hardware_channel,
                          status.gpio_pin,
                          status.active_level,
                          status.output_on ? "true" : "false",
@@ -1787,6 +2292,12 @@ int system_command(int argc, char **argv)
            IDF_VER,
            app->date,
            app->time);
+    const BoardConfig *board = board_config_get();
+    if (board != nullptr) {
+        printf("board: profile=%s model=\"%s\"\n", board->profile, board->model);
+    } else {
+        printf("board: unavailable (%s)\n", board_config_error());
+    }
     printf("uptime: %" PRIu64 "s (%" PRIu64 "d %" PRIu64 "h %" PRIu64 "m %" PRIu64 "s)\n",
            uptime_s,
            uptime_days,
@@ -1828,13 +2339,18 @@ int power4_help_command(int argc, char **argv)
     printf("  show batteries              list observed batteries\n");
     printf("  show banks                  list configured battery banks\n");
     printf("  show ble                    list BLE GAP procedure and connection state\n");
+    printf("  show board                  show the selected hardware profile\n");
     printf("  show debug                  show volatile debug settings\n");
+    printf("  show ethernet               show Ethernet settings and link state\n");
+    printf("  show inputs                 list digital input state\n");
     printf("  show logs                   print recent system log text\n");
+    printf("  show password               reveal TCP password (serial only)\n");
     printf("  show policy                 print the active policy program\n");
     printf("  show policy staged          print the staged policy program\n");
     printf("  show policy parameters      list persistent policy parameters\n");
     printf("  show relays                 list relay state\n");
     printf("  show system                 show firmware, uptime, heap, NVS, and tasks\n");
+    printf("  show time                   read the board RTC as local wall time\n");
     printf("\n");
     printf("report:\n");
     printf("  report banks                print framed JSON battery-bank state\n");
@@ -1845,10 +2361,15 @@ int power4_help_command(int argc, char **argv)
     printf("set:\n");
     printf("  set debug ble_scanner on    enable verbose BLE scanner logging\n");
     printf("  set debug ble_scanner off   disable verbose BLE scanner logging\n");
+    printf("  set ethernet dhcp           use DHCP and save the setting\n");
+    printf("  set ethernet static <ip> <netmask> <gateway> [dns1] [dns2]\n");
+    printf("  set ethernet phy <mode>     auto, 10-half, 10-full, 100-half, or 100-full\n");
+    printf("  set password [password]     generate or set TCP password (serial only)\n");
     printf("  set relay <n> on [seconds]  turn relay on for a bounded time\n");
     printf("  set relay <n> force-on      force relay on administratively\n");
     printf("  set relay <n> force-off     force relay off, overriding any timer\n");
     printf("  set relay <n> clear-force   clear administrative force\n");
+    printf("  set time <date> <time>      set local RTC time (YYYY-MM-DD HH:MM:SS)\n");
     printf("\n");
     printf("define/remove:\n");
     printf("  define bank <name> <battery> [battery...]\n");
@@ -1875,8 +2396,25 @@ int reboot_command(int argc, char **argv)
 
     printf("rebooting\n");
     fflush(stdout);
-    vTaskDelay(pdMS_TO_TICKS(100));
-    esp_restart();
+    if (g_reboot_timer == nullptr) {
+        const esp_timer_create_args_t timer_args = {
+            .callback = &reboot_timer_callback,
+            .arg = nullptr,
+            .dispatch_method = ESP_TIMER_TASK,
+            .name = "reboot",
+            .skip_unhandled_events = true,
+        };
+        const esp_err_t create_err = esp_timer_create(&timer_args, &g_reboot_timer);
+        if (create_err != ESP_OK) {
+            printf("reboot failed: %s\n", esp_err_to_name(create_err));
+            return 1;
+        }
+    }
+    const esp_err_t start_err = esp_timer_start_once(g_reboot_timer, 250000);
+    if (start_err != ESP_OK) {
+        printf("reboot failed: %s\n", esp_err_to_name(start_err));
+        return 1;
+    }
     return 0;
 }
 
@@ -1973,13 +2511,14 @@ void run_console_line(char *line)
     }
 
     int command_result = 0;
-    const esp_err_t err = esp_console_run(line, &command_result);
-    if (err == ESP_ERR_NOT_FOUND) {
-        printf("unknown command: %s\n", line);
-    } else if (err == ESP_ERR_INVALID_ARG) {
-        printf("invalid command line: %s\n", line);
-    } else if (err != ESP_OK) {
-        printf("command failed: %s\n", esp_err_to_name(err));
+    const esp_err_t err =
+        power4_console_execute(line,
+                               Power4CommandSource::Serial,
+                               nullptr,
+                               nullptr,
+                               &command_result);
+    if (err == ESP_ERR_TIMEOUT) {
+        printf("console busy; try again\n");
     }
 }
 
@@ -2062,6 +2601,97 @@ void console_task(void *arg)
 
 }  // namespace
 
+esp_err_t power4_console_execute(const char *command,
+                                 Power4CommandSource source,
+                                 FILE *input,
+                                 FILE *output,
+                                 int *command_result)
+{
+    if (command == nullptr || command[0] == '\0' || command_result == nullptr) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (g_command_mutex == nullptr) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    const bool framed =
+        strncmp(command, kToolCommandPrefix, sizeof(kToolCommandPrefix) - 1) == 0;
+    const char *actual_command =
+        framed ? command + sizeof(kToolCommandPrefix) - 1 : command;
+    if (framed && actual_command[0] == '\0') {
+        return ESP_ERR_INVALID_ARG;
+    }
+    // A failed network client must not be able to make the serial recovery
+    // console wait forever. Socket I/O has its own deadlines, and this bound
+    // also keeps a second command from becoming permanently stuck behind it.
+    if (xSemaphoreTake(g_command_mutex, kCommandMutexTimeoutTicks) != pdTRUE) {
+        if (framed) {
+            write_console_busy_frame(output != nullptr ? output : stdout);
+        }
+        return ESP_ERR_TIMEOUT;
+    }
+
+    FILE *previous_stdin = stdin;
+    FILE *previous_stdout = stdout;
+    FILE *destination = output != nullptr ? output : previous_stdout;
+    DotStuffStream dot_context = {
+        .destination = destination,
+        .line_start = true,
+    };
+    FILE *dot_stream = nullptr;
+    if (framed) {
+        dot_stream = funopen(&dot_context, nullptr, dot_stuff_write, nullptr, nullptr);
+        if (dot_stream == nullptr) {
+            xSemaphoreGive(g_command_mutex);
+            write_console_busy_frame(destination);
+            return ESP_ERR_NO_MEM;
+        }
+        setvbuf(dot_stream, nullptr, _IONBF, 0);
+    }
+    if (input != nullptr) {
+        stdin = input;
+    }
+    if (framed) {
+        stdout = dot_stream;
+        g_capture_task = xTaskGetCurrentTaskHandle();
+    } else if (output != nullptr) {
+        stdout = destination;
+        g_capture_task = xTaskGetCurrentTaskHandle();
+    }
+    g_command_source = source;
+
+    *command_result = 0;
+    const esp_err_t err = esp_console_run(actual_command, command_result);
+    if (err == ESP_ERR_NOT_FOUND) {
+        printf("unknown command: %s\n", actual_command);
+        *command_result = 1;
+    } else if (err == ESP_ERR_INVALID_ARG) {
+        printf("invalid command line: %s\n", actual_command);
+        *command_result = 1;
+    } else if (err != ESP_OK) {
+        printf("command failed: %s\n", esp_err_to_name(err));
+        *command_result = 1;
+    }
+    fflush(stdout);
+    if (framed) {
+        finish_dot_stuffed_response(&dot_context);
+    }
+
+    g_command_source = Power4CommandSource::Serial;
+    g_capture_task = nullptr;
+    stdin = previous_stdin;
+    stdout = previous_stdout;
+    if (dot_stream != nullptr) {
+        fclose(dot_stream);
+    }
+    xSemaphoreGive(g_command_mutex);
+    return err;
+}
+
+Power4CommandSource power4_console_command_source(void)
+{
+    return g_command_source;
+}
+
 esp_err_t power4_console_start(void)
 {
     esp_err_t err = setup_console_device();
@@ -2072,6 +2702,10 @@ esp_err_t power4_console_start(void)
 
     g_previous_log_vprintf = esp_log_set_vprintf(console_log_vprintf);
     register_commands();
+    g_command_mutex = xSemaphoreCreateMutexStatic(&g_command_mutex_storage);
+    if (g_command_mutex == nullptr) {
+        return ESP_ERR_NO_MEM;
+    }
 
     const BaseType_t created = xTaskCreate(console_task,
                                            "console",

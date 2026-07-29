@@ -1,0 +1,13 @@
+key,type,encoding,value
+board,namespace,,
+schema,data,u16,1
+profile,data,string,relay-6ch
+model,data,string,Waveshare ESP32-S3-Relay-6CH
+relay_kind,data,string,gpio
+relay_count,data,u8,6
+relay_active,data,u8,1
+relay_map,data,string,"1,2,41,42,45,46"
+i2c_present,data,u8,0
+eth_kind,data,string,none
+rtc_kind,data,string,none
+input_kind,data,string,none

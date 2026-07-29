@@ -1,5 +1,5 @@
 /*
- * power4ctl — serial management tool for the power4 ESP32 device
+ * power4ctl — serial and authenticated TCP management tool for power4
  *
  * Usage: power4ctl [-p port] [-b baud] [-t seconds] [-v] command
  *        power4ctl [-p port] [-b baud] [-t seconds] [-v]
@@ -13,11 +13,11 @@
  *
  * Interactive (REPL) mode — invoked with no command argument:
  *   Reads commands from stdin with libedit line editing and history.
- *   The serial port is opened per command and closed between prompts.
+ *   The selected transport is opened per command and closed between prompts.
  *   "exit" or "quit" (or Ctrl-D) end the session.
  *
  * Daemon mode (-D):
- *   Loops forever, opening the serial port each cycle, collecting the JSON
+ *   Loops forever, opening the selected transport each cycle, collecting JSON
  *   reports (batteries, banks, relays, logs), writing them atomically to
  *   the output directory, then closing the port and sleeping until the
  *   next interval.
@@ -27,6 +27,7 @@
  */
 
 #include <ctype.h>
+#include <arpa/inet.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <histedit.h>
@@ -40,12 +41,18 @@
 #include <sys/file.h>
 #include <sys/ioctl.h>
 #include <sys/select.h>
+#include <sys/socket.h>
 #include <sys/time.h>
 #include <termios.h>
 #include <time.h>
 #include <unistd.h>
 
 #include "sha1.h"
+#include "sha256.h"
+
+#define NETWORK_CONSOLE_PORT 4244
+#define PASSWORD_MIN_BYTES 16
+#define PASSWORD_MAX_BYTES 128
 
 /* ------------------------------------------------------------------ */
 /* Utilities                                                            */
@@ -116,6 +123,44 @@ static int wait_readable(int fd, const struct timespec *dl)
     FD_ZERO(&rfds);
     FD_SET(fd, &rfds);
     return select(fd + 1, &rfds, NULL, NULL, &tv);
+}
+
+static int read_line_fd(int fd,
+                        const struct timespec *deadline,
+                        char *line,
+                        size_t capacity)
+{
+    size_t length = 0;
+
+    while (length + 1 < capacity && !deadline_passed(deadline)) {
+        char ch;
+        ssize_t result;
+        if (wait_readable(fd, deadline) <= 0)
+            return 0;
+        result = read(fd, &ch, 1);
+        if (result <= 0)
+            return 0;
+        if (ch == '\n') {
+            if (length > 0 && line[length - 1] == '\r')
+                length--;
+            line[length] = '\0';
+            return 1;
+        }
+        line[length++] = ch;
+    }
+    line[capacity - 1] = '\0';
+    return 0;
+}
+
+static void digest_to_hex(const uint8_t *digest, size_t length, char *hex)
+{
+    static const char digits[] = "0123456789abcdef";
+    size_t i;
+    for (i = 0; i < length; i++) {
+        hex[i * 2] = digits[digest[i] >> 4];
+        hex[i * 2 + 1] = digits[digest[i] & 0x0f];
+    }
+    hex[length * 2] = '\0';
 }
 
 /* ------------------------------------------------------------------ */
@@ -251,6 +296,8 @@ static int open_serial_wait(const char *port, int baud, int wait_secs)
 
 /* Forward declaration — defined in main section below */
 static const char *g_port;
+static const char *g_address;
+static int write_all_fd(int fd, const void *data, size_t length);
 
 #define PROMPT          "power4> "
 #define PROMPT_LEN      8
@@ -260,13 +307,32 @@ static const char *g_port;
    header, so allow for the worst case. */
 #define LINEBUF         131072
 #define B64_LINE_WIDTH  76      /* 57 input bytes → 76 base64 chars per line */
+#define TOOL_PREFIX     "p4exec "
+
+enum dot_response_kind {
+    DOT_RESPONSE_PASSTHROUGH,
+    DOT_RESPONSE_JSON,
+    DOT_RESPONSE_UPLOAD
+};
+
+static int read_dot_response(int fd,
+                             const struct timespec *deadline,
+                             const char *echoed_command,
+                             enum dot_response_kind kind,
+                             char *json_out,
+                             size_t json_size);
 
 /*
- * Send a single "\r" then wait for "power4> ", repeating up to PROMPT_ATTEMPTS
- * times with the remaining timeout divided evenly across attempts.
+ * Wait for "power4> ". Serial mode sends a single "\r" before each attempt
+ * because the tool may attach in the middle of a prompt. TCP mode already has
+ * a synchronized prompt from authentication or the previous command, so it
+ * only reads; injecting an extra blank command can leave a second prompt queued
+ * ahead of the real command response.
  * Returns 1 on success, 0 on timeout.
  */
-static int wait_for_prompt(int fd, const struct timespec *deadline)
+static int wait_for_prompt(int fd,
+                           const struct timespec *deadline,
+                           int request_prompt)
 {
     char buf[512];
     int buflen = 0;
@@ -280,8 +346,10 @@ static int wait_for_prompt(int fd, const struct timespec *deadline)
         if (deadline_passed(deadline))
             return 0;
 
-        verbose_bytes(">>>", "\r", 1);
-        (void)write(fd, "\r", 1);
+        if (request_prompt) {
+            verbose_bytes(">>>", "\r", 1);
+            (void)write(fd, "\r", 1);
+        }
 
         /* Give this attempt an equal share of the remaining time */
         clock_gettime(CLOCK_MONOTONIC, &now);
@@ -367,77 +435,8 @@ static int send_base64(int fd, const uint8_t *data, size_t len)
 }
 
 /*
- * Read the device's response after a policy upload.  Scans complete lines for
- * success ("uploaded staged configuration:") or failure (" failed:") keywords.
- * Stops when the "power4> " prompt returns or the deadline passes.
- * Returns 1 on success, -1 on device-reported failure, 0 on timeout.
- */
-static int read_upload_response(int fd, const struct timespec *deadline)
-{
-    char buf[4096];
-    int buflen = 0;
-    int status = 0;
-
-    while (!deadline_passed(deadline)) {
-        int avail = (int)sizeof(buf) - buflen - 1;
-        int n, i;
-        char *start, *nl;
-
-        if (avail <= 0) {
-            /* Keep enough to detect a partial prompt */
-            memmove(buf, buf + buflen - (PROMPT_LEN - 1), PROMPT_LEN - 1);
-            buflen = PROMPT_LEN - 1;
-            avail  = (int)sizeof(buf) - buflen - 1;
-        }
-        if (wait_readable(fd, deadline) <= 0)
-            break;
-        n = (int)read(fd, buf + buflen, (size_t)avail);
-        if (n <= 0)
-            break;
-        verbose_bytes("<<<", buf + buflen, (size_t)n);
-        buflen += n;
-        buf[buflen] = '\0';
-
-        /* Process complete newline-terminated lines */
-        start = buf;
-        while ((nl = (char *)memchr(start, '\n',
-                                    (size_t)(buf + buflen - start))) != NULL) {
-            size_t llen;
-            *nl = '\0';
-            llen = (size_t)(nl - start);
-            if (llen > 0 && start[llen - 1] == '\r')
-                start[--llen] = '\0';
-
-            if (strstr(start, "uploaded staged configuration:") != NULL) {
-                puts(start);
-                status = 1;
-            } else if (status == 0 && strstr(start, " failed:") != NULL) {
-                fprintf(stderr, "%s\n", start);
-                status = -1;
-            }
-            start = nl + 1;
-        }
-
-        /* Compact */
-        {
-            int remain = (int)(buf + buflen - start);
-            if (remain > 0) memmove(buf, start, (size_t)remain);
-            buflen = remain;
-        }
-
-        /* Scan raw buffer for the prompt (not newline-terminated) */
-        for (i = 0; i <= buflen - PROMPT_LEN; i++) {
-            if (memcmp(buf + i, PROMPT, PROMPT_LEN) == 0)
-                return status == 0 ? 1 : status;
-        }
-    }
-
-    return status == 0 ? 0 : status;
-}
-
-/*
- * Read filename, compute SHA-1, issue "policy upload <sha1>\r", send base64
- * body followed by a blank line, then wait for the device's response.
+ * Read filename, compute SHA-1, issue the tool-wrapped policy upload command,
+ * send the base64 body followed by a blank line, then read its dot frame.
  * Returns 1 on success, -1 on error, 0 on timeout.
  */
 static int do_stage(int fd, const char *filename, const struct timespec *deadline)
@@ -446,7 +445,8 @@ static int do_stage(int fd, const char *filename, const struct timespec *deadlin
     long size;
     uint8_t *data;
     char sha1[41];
-    char cmd[72]; /* "policy upload " + 40 hex + "\r" + NUL */
+    char command[80];
+    char wire[82];
     int cmdlen, result;
 
     f = fopen(filename, "rb");
@@ -477,9 +477,10 @@ static int do_stage(int fd, const char *filename, const struct timespec *deadlin
 
     sha1_hex_of(data, (size_t)size, sha1);
 
-    cmdlen = snprintf(cmd, sizeof(cmd), "policy upload %s\r", sha1);
-    verbose_bytes(">>>", cmd, (size_t)cmdlen);
-    if (write(fd, cmd, (size_t)cmdlen) < 0) {
+    snprintf(command, sizeof(command), TOOL_PREFIX "policy upload %s", sha1);
+    cmdlen = snprintf(wire, sizeof(wire), "%s\r", command);
+    verbose_bytes(">>>", wire, (size_t)cmdlen);
+    if (write_all_fd(fd, wire, (size_t)cmdlen) != 0) {
         fprintf(stderr, "%s: write: %s\n", g_port, strerror(errno));
         free(data);
         return -1;
@@ -492,68 +493,15 @@ static int do_stage(int fd, const char *filename, const struct timespec *deadlin
     }
     free(data);
 
-    result = read_upload_response(fd, deadline);
+    result = read_dot_response(fd,
+                               deadline,
+                               g_address == NULL ? command : NULL,
+                               DOT_RESPONSE_UPLOAD,
+                               NULL,
+                               0);
     if (result == 0)
         fprintf(stderr, "%s: timed out waiting for upload response\n", g_port);
     return result;
-}
-
-/*
- * Send a command verbatim and echo every line back to stdout until the
- * "power4> " prompt returns.  Used for unrecognized/passthrough commands.
- * Returns 1 when the prompt is seen, 0 on timeout.
- */
-static int read_passthrough(int fd, const struct timespec *deadline)
-{
-    char buf[4096];
-    int buflen = 0;
-
-    while (!deadline_passed(deadline)) {
-        int avail = (int)sizeof(buf) - buflen - 1;
-        int n, i;
-        char *start, *nl;
-
-        if (avail <= 0) {
-            memmove(buf, buf + buflen - (PROMPT_LEN - 1), PROMPT_LEN - 1);
-            buflen = PROMPT_LEN - 1;
-            avail  = (int)sizeof(buf) - buflen - 1;
-        }
-        if (wait_readable(fd, deadline) <= 0)
-            break;
-        n = (int)read(fd, buf + buflen, (size_t)avail);
-        if (n <= 0)
-            break;
-        verbose_bytes("<<<", buf + buflen, (size_t)n);
-        buflen += n;
-        buf[buflen] = '\0';
-
-        /* Print and consume complete lines */
-        start = buf;
-        while ((nl = (char *)memchr(start, '\n',
-                                    (size_t)(buf + buflen - start))) != NULL) {
-            size_t llen;
-            *nl = '\0';
-            llen = (size_t)(nl - start);
-            if (llen > 0 && start[llen - 1] == '\r')
-                start[--llen] = '\0';
-            puts(start);
-            start = nl + 1;
-        }
-
-        /* Compact */
-        {
-            int remain = (int)(buf + buflen - start);
-            if (remain > 0) memmove(buf, start, (size_t)remain);
-            buflen = remain;
-        }
-
-        /* Check for prompt in the partial (non-newline-terminated) tail */
-        for (i = 0; i <= buflen - PROMPT_LEN; i++) {
-            if (memcmp(buf + i, PROMPT, PROMPT_LEN) == 0)
-                return 1;
-        }
-    }
-    return 0;
 }
 
 /*
@@ -613,62 +561,63 @@ static int parse_p4j1(const char *line, char *json_out, size_t json_size)
 }
 
 /*
- * Read lines from the serial port until a valid P4J1 line or deadline.
- * Non-P4J1 lines (log output, echo, etc.) are silently ignored.
- * If json_out is non-NULL the JSON is stored there; otherwise printed to stdout.
- * Returns 1 on success, 0 on timeout, -1 on validation error.
+ * Read one SMTP-style dot-stuffed command response. The firmware always
+ * terminates the response with "." on a line by itself. Reading exactly one
+ * line at a time deliberately leaves the following console prompt queued for
+ * the next command in a persistent session.
  */
-static int read_response(int fd, const struct timespec *deadline,
-                         char *json_out, size_t json_size)
+static int read_dot_response(int fd,
+                             const struct timespec *deadline,
+                             const char *echoed_command,
+                             enum dot_response_kind kind,
+                             char *json_out,
+                             size_t json_size)
 {
-    static char buf[LINEBUF];   /* static: too large for the stack */
-    int buflen = 0;
+    static char line[LINEBUF];
+    int status = 0;
+    int echo_pending = echoed_command != NULL;
 
     while (!deadline_passed(deadline)) {
-        int avail, n;
-        char *start, *nl;
+        int parsed;
+        if (!read_line_fd(fd, deadline, line, sizeof(line)))
+            return 0;
+        verbose_bytes("<<<", line, strlen(line));
 
-        if (wait_readable(fd, deadline) <= 0)
-            break;
+        if (echo_pending && strcmp(line, echoed_command) == 0) {
+            echo_pending = 0;
+            continue;
+        }
+        echo_pending = 0;
 
-        avail = (int)sizeof(buf) - buflen - 1;
-        if (avail <= 0) {
-            /* Buffer full with no newline — discard; can't be a valid line */
-            buflen = 0;
-            avail  = (int)sizeof(buf) - 1;
+        if (strcmp(line, ".") == 0) {
+            if (kind == DOT_RESPONSE_PASSTHROUGH)
+                return 1;
+            if (kind == DOT_RESPONSE_UPLOAD)
+                return status == 0 ? 1 : status;
+            return status;
+        }
+        if (line[0] == '.') {
+            if (line[1] != '.')
+                return -1;
+            memmove(line, line + 1, strlen(line));
         }
 
-        n = (int)read(fd, buf + buflen, (size_t)avail);
-        if (n <= 0)
-            break;
-        verbose_bytes("<<<", buf + buflen, (size_t)n);
-        buflen += n;
-        buf[buflen] = '\0';
-
-        start = buf;
-        while ((nl = (char *)memchr(start, '\n',
-                                    (size_t)(buf + buflen - start))) != NULL) {
-            size_t llen;
-            int r;
-
-            *nl = '\0';
-            llen = (size_t)(nl - start);
-            if (llen > 0 && start[llen - 1] == '\r')
-                start[--llen] = '\0';
-
-            r = parse_p4j1(start, json_out, json_size);
-            if (r != 0)
-                return r;
-
-            start = nl + 1;
+        if (kind == DOT_RESPONSE_PASSTHROUGH) {
+            puts(line);
+            continue;
         }
-
-        /* Compact: move any partial line to the front */
-        {
-            int remain = (int)(buf + buflen - start);
-            if (remain > 0)
-                memmove(buf, start, (size_t)remain);
-            buflen = remain;
+        if (kind == DOT_RESPONSE_JSON) {
+            parsed = parse_p4j1(line, json_out, json_size);
+            if (parsed != 0)
+                status = parsed;
+            continue;
+        }
+        if (strstr(line, "uploaded staged configuration:") != NULL) {
+            puts(line);
+            status = 1;
+        } else if (status == 0 && strstr(line, " failed:") != NULL) {
+            fprintf(stderr, "%s\n", line);
+            status = -1;
         }
     }
     return 0;
@@ -679,6 +628,11 @@ static int read_response(int fd, const struct timespec *deadline,
 /* ------------------------------------------------------------------ */
 
 static const char *g_port         = "/dev/ttyACM0";
+static const char *g_address      = NULL;
+static const char *g_password_env = NULL;
+static const char *g_password_file = NULL;
+static char        g_password[PASSWORD_MAX_BYTES + 1];
+static int         g_port_explicit = 0;
 static int         g_baud         = 115200;
 static int         g_timeout      = 2;
 static int         g_daemon       = 0;
@@ -686,8 +640,119 @@ static int         g_interval     = 60;
 static int         g_lock_timeout = 5;
 static const char *g_outdir       = "/run/power4";
 
+static int write_all_fd(int fd, const void *data, size_t length)
+{
+    const uint8_t *cursor = (const uint8_t *)data;
+    size_t written = 0;
+    while (written < length) {
+        ssize_t result = write(fd, cursor + written, length - written);
+        if (result <= 0)
+            return -1;
+        written += (size_t)result;
+    }
+    return 0;
+}
+
+static int authenticate_network(int fd)
+{
+    struct timespec deadline = deadline_from_now(g_timeout);
+    char challenge_line[96];
+    char response[96];
+    char result_line[96];
+    uint8_t digest[32];
+    char digest_hex[65];
+    static const char prefix[] = "authenticate ";
+    int response_length;
+
+    if (!read_line_fd(fd, &deadline, challenge_line, sizeof(challenge_line))) {
+        fprintf(stderr, "%s: timed out waiting for authentication challenge\n", g_address);
+        return -1;
+    }
+    if (strncmp(challenge_line, prefix, sizeof(prefix) - 1) != 0 ||
+        strlen(challenge_line + sizeof(prefix) - 1) != 43) {
+        fprintf(stderr, "%s: invalid authentication challenge\n", g_address);
+        return -1;
+    }
+
+    hmac_sha256(g_password,
+                strlen(g_password),
+                challenge_line + sizeof(prefix) - 1,
+                43,
+                digest);
+    digest_to_hex(digest, sizeof(digest), digest_hex);
+    memset(digest, 0, sizeof(digest));
+    response_length =
+        snprintf(response, sizeof(response), "authenticate %s\r\n", digest_hex);
+    memset(digest_hex, 0, sizeof(digest_hex));
+    if (response_length <= 0 ||
+        write_all_fd(fd, response, (size_t)response_length) != 0) {
+        fprintf(stderr, "%s: authentication write failed: %s\n",
+                g_address,
+                strerror(errno));
+        return -1;
+    }
+    memset(response, 0, sizeof(response));
+
+    deadline = deadline_from_now(g_timeout);
+    if (!read_line_fd(fd, &deadline, result_line, sizeof(result_line))) {
+        fprintf(stderr, "%s: timed out waiting for authentication result\n", g_address);
+        return -1;
+    }
+    if (strcmp(result_line, "authenticated") != 0) {
+        fprintf(stderr, "%s: authentication failed\n", g_address);
+        return -1;
+    }
+    // Leave the initial prompt in the socket. The normal command path consumes
+    // it, just as it consumes each prompt following a command.
+    return 0;
+}
+
+static int open_network(void)
+{
+    int fd;
+    struct sockaddr_in address;
+
+    fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) {
+        fprintf(stderr, "socket: %s\n", strerror(errno));
+        return -1;
+    }
+    (void)fcntl(fd, F_SETFD, FD_CLOEXEC);
+
+    memset(&address, 0, sizeof(address));
+    address.sin_family = AF_INET;
+    address.sin_port = htons(NETWORK_CONSOLE_PORT);
+    if (inet_pton(AF_INET, g_address, &address.sin_addr) != 1) {
+        fprintf(stderr, "invalid IPv4 address: %s\n", g_address);
+        close(fd);
+        return -1;
+    }
+    if (connect(fd, (struct sockaddr *)&address, sizeof(address)) < 0) {
+        fprintf(stderr, "connect %s:%d: %s\n",
+                g_address,
+                NETWORK_CONSOLE_PORT,
+                strerror(errno));
+        close(fd);
+        return -1;
+    }
+    if (authenticate_network(fd) != 0) {
+        close(fd);
+        return -1;
+    }
+    return fd;
+}
+
+static int open_transport(int wait_for_lock)
+{
+    if (g_address != NULL)
+        return open_network();
+    return wait_for_lock
+               ? open_serial_wait(g_port, g_baud, g_lock_timeout)
+               : open_serial(g_port, g_baud);
+}
+
 /*
- * Open the serial port, execute one command, close the port.
+ * Open the selected transport, execute one command, and close it.
  * cmd is the full command string, e.g. "json batteries", "stage foo.lua",
  * or any passthrough command like "show relays".
  * Returns 0 on success, 1 on error.
@@ -704,39 +769,49 @@ static int run_device_command(const char *cmd)
             fprintf(stderr, "usage: stage <filename>\n");
             return 1;
         }
-        fd = open_serial(g_port, g_baud);
+        fd = open_transport(0);
         if (fd < 0) return 1;
         deadline = deadline_from_now(g_timeout);
-        if (!wait_for_prompt(fd, &deadline)) {
+        if (!wait_for_prompt(fd, &deadline, g_address == NULL)) {
             fprintf(stderr, "%s: timed out waiting for prompt\n", g_port);
             close(fd);
             return 1;
         }
+        deadline = deadline_from_now(g_timeout);
         result = do_stage(fd, filename, &deadline);
         close(fd);
         return result == 1 ? 0 : 1;
     }
 
-    fd = open_serial(g_port, g_baud);
+    fd = open_transport(0);
     if (fd < 0) return 1;
     deadline = deadline_from_now(g_timeout);
 
-    if (!wait_for_prompt(fd, &deadline)) {
+    if (!wait_for_prompt(fd, &deadline, g_address == NULL)) {
         fprintf(stderr, "%s: timed out waiting for prompt\n", g_port);
         close(fd);
         return 1;
     }
 
     if (strncmp(cmd, "json ", 5) == 0) {
-        char dev_cmd[128];
-        int llen = snprintf(dev_cmd, sizeof(dev_cmd), "report%s\r", cmd + 4);
-        verbose_bytes(">>>", dev_cmd, (size_t)llen);
-        if (write(fd, dev_cmd, (size_t)llen) < 0) {
+        char command[160];
+        char wire[162];
+        int llen;
+        snprintf(command, sizeof(command), TOOL_PREFIX "report%s", cmd + 4);
+        llen = snprintf(wire, sizeof(wire), "%s\r", command);
+        verbose_bytes(">>>", wire, (size_t)llen);
+        if (write_all_fd(fd, wire, (size_t)llen) != 0) {
             fprintf(stderr, "%s: write: %s\n", g_port, strerror(errno));
             close(fd);
             return 1;
         }
-        result = read_response(fd, &deadline, NULL, 0);
+        deadline = deadline_from_now(g_timeout);
+        result = read_dot_response(fd,
+                                   &deadline,
+                                   g_address == NULL ? command : NULL,
+                                   DOT_RESPONSE_JSON,
+                                   NULL,
+                                   0);
         close(fd);
         if (result == 1) return 0;
         if (result == 0)
@@ -744,25 +819,33 @@ static int run_device_command(const char *cmd)
         return 1;
     }
 
-    /* Passthrough: send verbatim with \r, echo output to stdout */
+    /* Tool command: read dot-stuffed output through its explicit terminator. */
     {
         size_t cmdlen = strlen(cmd);
-        char line[1026];
+        char command[1034];
+        char wire[1036];
         int llen;
-        if (cmdlen > sizeof(line) - 2)
-            cmdlen = sizeof(line) - 2;
-        llen = snprintf(line, sizeof(line), "%.*s\r", (int)cmdlen, cmd);
-        verbose_bytes(">>>", line, (size_t)llen);
-        if (write(fd, line, (size_t)llen) < 0) {
+        if (cmdlen > sizeof(command) - sizeof(TOOL_PREFIX))
+            cmdlen = sizeof(command) - sizeof(TOOL_PREFIX);
+        snprintf(command, sizeof(command), TOOL_PREFIX "%.*s", (int)cmdlen, cmd);
+        llen = snprintf(wire, sizeof(wire), "%s\r", command);
+        verbose_bytes(">>>", wire, (size_t)llen);
+        if (write_all_fd(fd, wire, (size_t)llen) != 0) {
             fprintf(stderr, "%s: write: %s\n", g_port, strerror(errno));
             close(fd);
             return 1;
         }
+        deadline = deadline_from_now(g_timeout);
+        result = read_dot_response(fd,
+                                   &deadline,
+                                   g_address == NULL ? command : NULL,
+                                   DOT_RESPONSE_PASSTHROUGH,
+                                   NULL,
+                                   0);
     }
-    result = read_passthrough(fd, &deadline);
     close(fd);
     if (result == 0)
-        fprintf(stderr, "%s: timed out waiting for prompt\n", g_port);
+        fprintf(stderr, "%s: timed out waiting for response terminator\n", g_port);
     return result == 1 ? 0 : 1;
 }
 
@@ -821,7 +904,7 @@ static int do_one_cycle(void)
     static char json_buf[LINEBUF];
     int fd, i;
 
-    fd = open_serial_wait(g_port, g_baud, g_lock_timeout);
+    fd = open_transport(1);
     if (fd < 0)
         return -1;
 
@@ -830,20 +913,28 @@ static int do_one_cycle(void)
         char dev_cmd[32];
         int llen;
 
-        if (!wait_for_prompt(fd, &deadline)) {
+        if (!wait_for_prompt(fd, &deadline, g_address == NULL)) {
             fprintf(stderr, "daemon: timed out waiting for prompt\n");
             break;
         }
 
-        llen = snprintf(dev_cmd, sizeof(dev_cmd), "report %s\r", REPORTS[i]);
+        char command[48];
+        snprintf(command, sizeof(command), TOOL_PREFIX "report %s", REPORTS[i]);
+        llen = snprintf(dev_cmd, sizeof(dev_cmd), "%s\r", command);
         verbose_bytes(">>>", dev_cmd, (size_t)llen);
-        if (write(fd, dev_cmd, (size_t)llen) < 0) {
+        if (write_all_fd(fd, dev_cmd, (size_t)llen) != 0) {
             fprintf(stderr, "%s: write: %s\n", g_port, strerror(errno));
             break;
         }
 
+        deadline = deadline_from_now(g_timeout);
         json_buf[0] = '\0';
-        if (read_response(fd, &deadline, json_buf, sizeof(json_buf)) == 1)
+        if (read_dot_response(fd,
+                              &deadline,
+                              g_address == NULL ? command : NULL,
+                              DOT_RESPONSE_JSON,
+                              json_buf,
+                              sizeof(json_buf)) == 1)
             write_json_atomic(g_outdir, REPORTS[i], json_buf);
         else
             fprintf(stderr, "daemon: timed out waiting for %s report\n", REPORTS[i]);
@@ -884,8 +975,13 @@ static void do_daemon(void)
         if (sleep_ms > 0) {
             sleep_ts.tv_sec  = sleep_ms / 1000;
             sleep_ts.tv_nsec = (sleep_ms % 1000) * 1000000L;
-            /* Use CLOCK_MONOTONIC so SIGTERM/SIGINT wakes us cleanly */
-            clock_nanosleep(CLOCK_MONOTONIC, 0, &sleep_ts, NULL);
+            /*
+             * nanosleep() is available on both Linux and macOS. The elapsed
+             * time above is still measured with CLOCK_MONOTONIC, and an
+             * arriving SIGTERM/SIGINT interrupts this sleep so g_stop can be
+             * checked immediately.
+             */
+            nanosleep(&sleep_ts, NULL);
         }
     }
 }
@@ -972,13 +1068,19 @@ static void do_repl(void)
 static void usage(void)
 {
     fprintf(stderr,
-            "usage: power4ctl [-p port] [-b baud] [-t seconds] [-v] command [args...]\n"
-            "       power4ctl [-p port] [-b baud] [-t seconds] [-v]\n"
-            "       power4ctl [-p port] [-b baud] [-t seconds] [-v]\n"
+            "usage: power4ctl [-p port | -a address (-e name | -f file)]\n"
+            "                 [-b baud] [-t seconds] [-v] command [args...]\n"
+            "       power4ctl [-p port | -a address (-e name | -f file)]\n"
+            "                 [-b baud] [-t seconds] [-v]\n"
+            "       power4ctl [-p port | -a address (-e name | -f file)]\n"
+            "                 [-b baud] [-t seconds] [-v]\n"
             "                 -D [-i interval] [-l lock-seconds] [-o outdir]\n"
             "\n"
             "options:\n"
             "  -p port          serial port  (default: /dev/ttyACM0)\n"
+            "  -a address       use authenticated TCP console at IPv4 address\n"
+            "  -e name          read TCP password from environment variable name\n"
+            "  -f file          read TCP password from file, trimming whitespace\n"
             "  -b baud          baud rate    (default: 115200)\n"
             "  -t seconds       timeout per operation  (default: 2)\n"
             "  -v               verbose: log bytes sent/received to stderr\n"
@@ -999,13 +1101,114 @@ static void usage(void)
             "  Type 'exit' or 'quit', or press Ctrl-D to leave the REPL.\n");
 }
 
+static int password_copy_checked(const char *source)
+{
+    size_t length;
+    size_t i;
+
+    if (source == NULL) {
+        return -1;
+    }
+    length = strlen(source);
+    if (length < PASSWORD_MIN_BYTES || length > PASSWORD_MAX_BYTES) {
+        fprintf(stderr, "password must be %d-%d printable bytes\n",
+                PASSWORD_MIN_BYTES,
+                PASSWORD_MAX_BYTES);
+        return -1;
+    }
+    for (i = 0; i < length; i++) {
+        unsigned char ch = (unsigned char)source[i];
+        if (ch < ' ' || ch > '~') {
+            fprintf(stderr, "password contains a non-printable byte\n");
+            return -1;
+        }
+    }
+    memcpy(g_password, source, length + 1);
+    return 0;
+}
+
+static int load_password_file(const char *path)
+{
+    FILE *file;
+    char contents[1024];
+    size_t length;
+    char *start;
+    char *end;
+    int result;
+
+    file = fopen(path, "rb");
+    if (file == NULL) {
+        fprintf(stderr, "%s: %s\n", path, strerror(errno));
+        return -1;
+    }
+    length = fread(contents, 1, sizeof(contents) - 1, file);
+    if (ferror(file) || (!feof(file) && length == sizeof(contents) - 1)) {
+        fprintf(stderr, "%s: password file is too large or unreadable\n", path);
+        fclose(file);
+        memset(contents, 0, sizeof(contents));
+        return -1;
+    }
+    fclose(file);
+    contents[length] = '\0';
+
+    start = contents;
+    while (*start != '\0' && isspace((unsigned char)*start))
+        start++;
+    end = contents + length;
+    while (end > start && isspace((unsigned char)end[-1]))
+        end--;
+    *end = '\0';
+    result = password_copy_checked(start);
+    memset(contents, 0, sizeof(contents));
+    return result;
+}
+
+static void clear_password(void)
+{
+    volatile unsigned char *cursor = (volatile unsigned char *)g_password;
+    size_t i;
+    for (i = 0; i < sizeof(g_password); i++)
+        cursor[i] = 0;
+}
+
+static int configure_transport_credentials(void)
+{
+    if (g_address == NULL) {
+        if (g_password_env != NULL || g_password_file != NULL) {
+            fprintf(stderr, "-e and -f require -a\n");
+            return -1;
+        }
+        return 0;
+    }
+    if (g_port_explicit) {
+        fprintf(stderr, "-p and -a are mutually exclusive\n");
+        return -1;
+    }
+    if ((g_password_env == NULL) == (g_password_file == NULL)) {
+        fprintf(stderr, "-a requires exactly one of -e or -f\n");
+        return -1;
+    }
+    if (g_password_env != NULL) {
+        const char *value = getenv(g_password_env);
+        if (value == NULL) {
+            fprintf(stderr, "environment variable %s is not set\n", g_password_env);
+            return -1;
+        }
+        return password_copy_checked(value);
+    }
+    return load_password_file(g_password_file);
+}
+
 int main(int argc, char **argv)
 {
     int opt;
 
-    while ((opt = getopt(argc, argv, "p:b:t:vDi:l:o:")) != -1) {
+    while ((opt = getopt(argc, argv, "p:a:e:f:b:t:vDi:l:o:")) != -1) {
         switch (opt) {
-        case 'p': g_port         = optarg;       break;
+        case 'p': g_port         = optarg; g_port_explicit = 1; break;
+        case 'a': g_address      = optarg;       break;
+        case 'e': g_password_env = optarg;       break;
+        case 'f': g_password_file = optarg;      break;
         case 'b': g_baud         = atoi(optarg); break;
         case 't': g_timeout      = atoi(optarg); break;
         case 'v': g_verbose      = 1;            break;
@@ -1018,6 +1221,10 @@ int main(int argc, char **argv)
             return 1;
         }
     }
+
+    if (configure_transport_credentials() != 0)
+        return 1;
+    atexit(clear_password);
 
     if (g_daemon) {
         if (optind < argc) {

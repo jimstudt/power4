@@ -1,13 +1,12 @@
 #include "relay_manager.hpp"
 
 #include <algorithm>
-#include <ctype.h>
-#include <errno.h>
 #include <inttypes.h>
-#include <stdlib.h>
 #include <string.h>
 
+#include "board_i2c.hpp"
 #include "driver/gpio.h"
+#include "driver/i2c_master.h"
 #include "esp_check.h"
 #include "esp_log.h"
 #include "esp_timer.h"
@@ -23,6 +22,10 @@ constexpr uint32_t kQueueLength = 16;
 constexpr uint32_t kTaskStackBytes = 6144;
 constexpr UBaseType_t kTaskPriority = 5;
 constexpr TickType_t kRequestTimeout = pdMS_TO_TICKS(1000);
+constexpr int kI2cTimeoutMs = 100;
+
+constexpr uint8_t kTcaOutputRegister = 0x01;
+constexpr uint8_t kTcaConfigurationRegister = 0x03;
 
 struct RelayState {
     bool timer_active = false;
@@ -55,12 +58,14 @@ QueueHandle_t g_queue = nullptr;
 StaticQueue_t g_queue_storage = {};
 uint8_t g_queue_buffer[kQueueLength * sizeof(RelayMessage)] = {};
 
-RelayState g_relays[CONFIG_POWER4_RELAY_COUNT] = {};
-gpio_num_t g_relay_gpio[CONFIG_POWER4_RELAY_COUNT] = {};
+RelayState g_relays[CONFIG_POWER4_MAX_RELAYS] = {};
+RelayHardwareConfig g_hardware = {};
+i2c_master_dev_handle_t g_tca9554 = nullptr;
+uint8_t g_tca_output = 0;
 
 bool valid_relay(uint8_t relay)
 {
-    return relay >= 1 && relay <= CONFIG_POWER4_RELAY_COUNT;
+    return relay >= 1 && relay <= g_hardware.count;
 }
 
 int64_t now_us(void)
@@ -79,12 +84,24 @@ uint32_t remaining_seconds(int64_t now, int64_t deadline)
     return rounded_up_s > UINT32_MAX ? UINT32_MAX : static_cast<uint32_t>(rounded_up_s);
 }
 
+int output_level_for(bool relay_on)
+{
+    if (relay_on) {
+        return g_hardware.active_level;
+    }
+    return g_hardware.active_level == 0 ? 1 : 0;
+}
+
 RelayStatus make_status(uint8_t relay, const RelayState &state, int64_t now)
 {
     RelayStatus status = {};
     status.relay = relay;
-    status.gpio_pin = static_cast<int>(g_relay_gpio[relay - 1]);
-    status.active_level = CONFIG_POWER4_RELAY_ACTIVE_LEVEL;
+    status.backend = g_hardware.kind;
+    status.hardware_channel = g_hardware.channels[relay - 1];
+    if (g_hardware.kind == RelayBackendKind::Gpio) {
+        status.gpio_pin = status.hardware_channel;
+    }
+    status.active_level = g_hardware.active_level;
     status.timer_active = state.timer_active;
     status.force = state.force;
     status.output_on = state.output_on;
@@ -94,77 +111,22 @@ RelayStatus make_status(uint8_t relay, const RelayState &state, int64_t now)
     return status;
 }
 
-int gpio_level_for(bool relay_on)
+esp_err_t tca_write_register(uint8_t reg, uint8_t value)
 {
-    if (relay_on) {
-        return CONFIG_POWER4_RELAY_ACTIVE_LEVEL;
-    }
-
-    return CONFIG_POWER4_RELAY_ACTIVE_LEVEL == 0 ? 1 : 0;
+    uint8_t data[2] = {reg, value};
+    return i2c_master_transmit(g_tca9554, data, sizeof(data), kI2cTimeoutMs);
 }
 
-esp_err_t parse_gpio_map(void)
+esp_err_t configure_gpio_backend(void)
 {
-    const char *cursor = CONFIG_POWER4_RELAY_GPIO_MAP;
-
-    for (uint8_t relay = 1; relay <= CONFIG_POWER4_RELAY_COUNT; ++relay) {
-        while (isspace(static_cast<unsigned char>(*cursor))) {
-            ++cursor;
-        }
-
-        errno = 0;
-        char *end = nullptr;
-        const long pin = strtol(cursor, &end, 10);
-        ESP_RETURN_ON_FALSE(end != cursor && errno == 0,
-                            ESP_ERR_INVALID_ARG,
-                            kTag,
-                            "missing GPIO for relay %u in POWER4_RELAY_GPIO_MAP",
-                            relay);
-        ESP_RETURN_ON_FALSE(pin >= 0 && pin <= GPIO_NUM_MAX,
-                            ESP_ERR_INVALID_ARG,
-                            kTag,
-                            "GPIO %ld for relay %u is out of range",
-                            pin,
-                            relay);
-        ESP_RETURN_ON_FALSE(GPIO_IS_VALID_OUTPUT_GPIO(pin),
-                            ESP_ERR_INVALID_ARG,
-                            kTag,
-                            "GPIO %ld for relay %u is not output-capable",
-                            pin,
-                            relay);
-
-        g_relay_gpio[relay - 1] = static_cast<gpio_num_t>(pin);
-        cursor = end;
-
-        while (isspace(static_cast<unsigned char>(*cursor))) {
-            ++cursor;
-        }
-
-        if (relay < CONFIG_POWER4_RELAY_COUNT) {
-            ESP_RETURN_ON_FALSE(*cursor == ',',
-                                ESP_ERR_INVALID_ARG,
-                                kTag,
-                                "expected comma after GPIO for relay %u",
-                                relay);
-            ++cursor;
-        } else {
-            ESP_RETURN_ON_FALSE(*cursor == '\0',
-                                ESP_ERR_INVALID_ARG,
-                                kTag,
-                                "too many GPIOs in POWER4_RELAY_GPIO_MAP");
-        }
-    }
-
-    return ESP_OK;
-}
-
-esp_err_t configure_relay_gpio(void)
-{
-    ESP_RETURN_ON_ERROR(parse_gpio_map(), kTag, "invalid relay GPIO map");
-
     uint64_t pin_mask = 0;
-    for (uint8_t relay = 1; relay <= CONFIG_POWER4_RELAY_COUNT; ++relay) {
-        pin_mask |= 1ULL << g_relay_gpio[relay - 1];
+    for (uint8_t i = 0; i < g_hardware.count; ++i) {
+        const gpio_num_t gpio = static_cast<gpio_num_t>(g_hardware.channels[i]);
+        ESP_RETURN_ON_ERROR(gpio_set_level(gpio, output_level_for(false)),
+                            kTag,
+                            "failed to preload relay %u GPIO inactive",
+                            i + 1);
+        pin_mask |= 1ULL << gpio;
     }
 
     gpio_config_t io_config = {};
@@ -173,22 +135,68 @@ esp_err_t configure_relay_gpio(void)
     io_config.pull_up_en = GPIO_PULLUP_DISABLE;
     io_config.pull_down_en = GPIO_PULLDOWN_DISABLE;
     io_config.intr_type = GPIO_INTR_DISABLE;
-
     ESP_RETURN_ON_ERROR(gpio_config(&io_config), kTag, "failed to configure relay GPIOs");
 
-    for (uint8_t relay = 1; relay <= CONFIG_POWER4_RELAY_COUNT; ++relay) {
-        ESP_RETURN_ON_ERROR(gpio_set_level(g_relay_gpio[relay - 1], gpio_level_for(false)),
-                            kTag,
-                            "failed to set relay %u GPIO inactive",
-                            relay);
+    for (uint8_t i = 0; i < g_hardware.count; ++i) {
         ESP_LOGI(kTag,
-                 "relay %u mapped to GPIO %d active_level=%d",
-                 relay,
-                 static_cast<int>(g_relay_gpio[relay - 1]),
-                 CONFIG_POWER4_RELAY_ACTIVE_LEVEL);
+                 "relay %u mapped to GPIO %d active_level=%u",
+                 i + 1,
+                 g_hardware.channels[i],
+                 g_hardware.active_level);
+    }
+    return ESP_OK;
+}
+
+esp_err_t configure_tca9554_backend(uint32_t i2c_frequency_hz)
+{
+    ESP_RETURN_ON_ERROR(board_i2c_add_device(g_hardware.i2c_address,
+                                              i2c_frequency_hz,
+                                              &g_tca9554),
+                        kTag,
+                        "failed to attach TCA9554");
+
+    g_tca_output = g_hardware.active_level == 0 ? 0xff : 0x00;
+    ESP_RETURN_ON_ERROR(tca_write_register(kTcaOutputRegister, g_tca_output),
+                        kTag,
+                        "failed to drive TCA9554 relays inactive");
+    ESP_RETURN_ON_ERROR(tca_write_register(kTcaConfigurationRegister, 0x00),
+                        kTag,
+                        "failed to configure TCA9554 outputs");
+
+    for (uint8_t i = 0; i < g_hardware.count; ++i) {
+        ESP_LOGI(kTag,
+                 "relay %u mapped to TCA9554 0x%02x bit %d active_level=%u",
+                 i + 1,
+                 g_hardware.i2c_address,
+                 g_hardware.channels[i],
+                 g_hardware.active_level);
+    }
+    return ESP_OK;
+}
+
+esp_err_t hardware_set_output(uint8_t relay, bool output_on)
+{
+    const int channel = g_hardware.channels[relay - 1];
+    if (g_hardware.kind == RelayBackendKind::Gpio) {
+        return gpio_set_level(static_cast<gpio_num_t>(channel), output_level_for(output_on));
     }
 
-    return ESP_OK;
+    if (g_hardware.kind == RelayBackendKind::Tca9554) {
+        const uint8_t mask = static_cast<uint8_t>(1U << channel);
+        uint8_t next = g_tca_output;
+        if (output_level_for(output_on) != 0) {
+            next |= mask;
+        } else {
+            next &= static_cast<uint8_t>(~mask);
+        }
+        esp_err_t err = tca_write_register(kTcaOutputRegister, next);
+        if (err == ESP_OK) {
+            g_tca_output = next;
+        }
+        return err;
+    }
+
+    return ESP_ERR_NOT_SUPPORTED;
 }
 
 void apply_output(uint8_t relay, RelayState *state)
@@ -210,30 +218,31 @@ void apply_output(uint8_t relay, RelayState *state)
         return;
     }
 
-    state->output_on = desired_on;
-
-    const esp_err_t err = gpio_set_level(g_relay_gpio[relay - 1], gpio_level_for(desired_on));
+    const esp_err_t err = hardware_set_output(relay, desired_on);
     if (err != ESP_OK) {
         ESP_LOGE(kTag,
-                 "failed to set relay %u GPIO %d: %s",
+                 "failed to set relay %u through %s channel %d: %s",
                  relay,
-                 static_cast<int>(g_relay_gpio[relay - 1]),
+                 relay_backend_name(g_hardware.kind),
+                 g_hardware.channels[relay - 1],
                  esp_err_to_name(err));
         return;
     }
 
+    state->output_on = desired_on;
     ESP_LOGI(kTag,
-             "relay %u GPIO %d output %s (timer=%s force=%s)",
+             "relay %u output %s via %s channel %d (timer=%s force=%s)",
              relay,
-             static_cast<int>(g_relay_gpio[relay - 1]),
              desired_on ? "on" : "off",
+             relay_backend_name(g_hardware.kind),
+             g_hardware.channels[relay - 1],
              state->timer_active ? "on" : "off",
              relay_force_name(state->force));
 }
 
 void expire_timers(int64_t now)
 {
-    for (uint8_t relay = 1; relay <= CONFIG_POWER4_RELAY_COUNT; ++relay) {
+    for (uint8_t relay = 1; relay <= g_hardware.count; ++relay) {
         RelayState &state = g_relays[relay - 1];
         if (state.timer_active && state.off_at_us <= now) {
             state.timer_active = false;
@@ -270,22 +279,18 @@ void handle_message(const RelayMessage &message)
         apply_output(message.relay, &state);
         break;
     }
-
     case MessageType::ForceOn:
         state.force = RelayForce::On;
         apply_output(message.relay, &state);
         break;
-
     case MessageType::ForceOff:
         state.force = RelayForce::Off;
         apply_output(message.relay, &state);
         break;
-
     case MessageType::ClearForce:
         state.force = RelayForce::None;
         apply_output(message.relay, &state);
         break;
-
     case MessageType::Query:
         break;
     }
@@ -301,15 +306,16 @@ void handle_message(const RelayMessage &message)
 void relay_task(void *arg)
 {
     (void)arg;
-
-    ESP_LOGI(kTag, "started with %u relays", CONFIG_POWER4_RELAY_COUNT);
+    ESP_LOGI(kTag,
+             "started with %u relays using %s",
+             g_hardware.count,
+             relay_backend_name(g_hardware.kind));
 
     while (true) {
         RelayMessage message = {};
         if (xQueueReceive(g_queue, &message, pdMS_TO_TICKS(250)) == pdTRUE) {
             handle_message(message);
         }
-
         expire_timers(now_us());
     }
 }
@@ -319,12 +325,7 @@ esp_err_t send_message(const RelayMessage &message)
     if (g_queue == nullptr) {
         return ESP_ERR_INVALID_STATE;
     }
-
-    if (xQueueSend(g_queue, &message, kRequestTimeout) != pdTRUE) {
-        return ESP_ERR_TIMEOUT;
-    }
-
-    return ESP_OK;
+    return xQueueSend(g_queue, &message, kRequestTimeout) == pdTRUE ? ESP_OK : ESP_ERR_TIMEOUT;
 }
 
 esp_err_t send_command(MessageType type, uint8_t relay, uint32_t seconds = 0)
@@ -332,12 +333,10 @@ esp_err_t send_command(MessageType type, uint8_t relay, uint32_t seconds = 0)
     if (!valid_relay(relay)) {
         return ESP_ERR_INVALID_ARG;
     }
-
     RelayMessage message = {};
     message.type = type;
     message.relay = relay;
     message.seconds = seconds;
-
     return send_message(message);
 }
 
@@ -358,17 +357,30 @@ const char *relay_force_name(RelayForce force)
 
 uint8_t relay_manager_count(void)
 {
-    return CONFIG_POWER4_RELAY_COUNT;
+    return g_hardware.count;
 }
 
-esp_err_t relay_manager_start(void)
+esp_err_t relay_manager_start(const BoardConfig &board)
 {
     if (g_queue != nullptr) {
         return ESP_OK;
     }
+    ESP_RETURN_ON_FALSE(board.relay.count <= CONFIG_POWER4_MAX_RELAYS,
+                        ESP_ERR_INVALID_SIZE,
+                        kTag,
+                        "board relay count exceeds firmware capacity");
 
     memset(g_relays, 0, sizeof(g_relays));
-    ESP_RETURN_ON_ERROR(configure_relay_gpio(), kTag, "failed to configure relay hardware");
+    g_hardware = board.relay;
+    if (g_hardware.kind == RelayBackendKind::Gpio) {
+        ESP_RETURN_ON_ERROR(configure_gpio_backend(), kTag, "failed to configure GPIO relays");
+    } else if (g_hardware.kind == RelayBackendKind::Tca9554) {
+        ESP_RETURN_ON_ERROR(configure_tca9554_backend(board.i2c.frequency_hz),
+                            kTag,
+                            "failed to configure TCA9554 relays");
+    } else {
+        return ESP_ERR_NOT_SUPPORTED;
+    }
 
     g_queue = xQueueCreateStatic(kQueueLength,
                                  sizeof(RelayMessage),
@@ -383,7 +395,6 @@ esp_err_t relay_manager_start(void)
                                 kTaskPriority,
                                 nullptr);
     ESP_RETURN_ON_FALSE(ok == pdPASS, ESP_ERR_NO_MEM, kTag, "failed to create task");
-
     return ESP_OK;
 }
 

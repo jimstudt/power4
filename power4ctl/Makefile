@@ -7,7 +7,7 @@ VERSION := $(strip $(shell cat ../version.txt))
 ifeq ($(VERSION),)
 $(error cannot read version from ../version.txt)
 endif
-OBJS     = power4ctl.o sha1.o
+OBJS     = power4ctl.o sha1.o sha256.o
 LIBS     = -ledit
 
 BINDIR      = /usr/local/bin
@@ -23,18 +23,28 @@ ARCH    := $(shell dpkg --print-architecture 2>/dev/null || \
 PKGROOT  = pkgroot
 PKGFILE  = $(TARGET)_$(VERSION)_$(ARCH).deb
 
-.PHONY: all install uninstall deb clean
+.PHONY: all test install uninstall deb clean
 
 all: $(TARGET)
 
 $(TARGET): $(OBJS)
 	$(CC) $(CFLAGS) -o $(TARGET) $(OBJS) $(LIBS)
 
-power4ctl.o: power4ctl.c sha1.h
+power4ctl.o: power4ctl.c sha1.h sha256.h
 	$(CC) $(CFLAGS) -c -o $@ power4ctl.c
 
 sha1.o: sha1.c sha1.h
 	$(CC) $(CFLAGS) -c -o $@ sha1.c
+
+sha256.o: sha256.c sha256.h
+	$(CC) $(CFLAGS) -c -o $@ sha256.c
+
+test_sha256: test_sha256.c sha256.c sha256.h
+	$(CC) $(CFLAGS) -o $@ test_sha256.c sha256.c
+
+test: $(TARGET) test_sha256
+	./test_sha256
+	python3 test_tcp_console.py
 
 install: $(TARGET)
 	install -m 755 $(TARGET) $(BINDIR)/$(TARGET)
@@ -65,5 +75,5 @@ deb: $(TARGET)
 	rm -rf $(PKGROOT)
 
 clean:
-	rm -f $(TARGET) $(OBJS)
+	rm -f $(TARGET) $(OBJS) test_sha256
 	rm -rf $(PKGROOT) $(TARGET)_*.deb

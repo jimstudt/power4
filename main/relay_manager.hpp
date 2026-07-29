@@ -2,6 +2,7 @@
 
 #include <stdint.h>
 
+#include "board_config.hpp"
 #include "esp_err.h"
 
 // Administrative override. Force-off wins over everything, including an
@@ -14,6 +15,8 @@ enum class RelayForce : uint8_t {
 
 struct RelayStatus {
     uint8_t relay = 0;
+    RelayBackendKind backend = RelayBackendKind::None;
+    int hardware_channel = -1;
     int gpio_pin = -1;
     uint8_t active_level = 1;
     bool timer_active = false;
@@ -25,7 +28,7 @@ struct RelayStatus {
 const char *relay_force_name(RelayForce force);
 
 uint8_t relay_manager_count(void);
-esp_err_t relay_manager_start(void);
+esp_err_t relay_manager_start(const BoardConfig &board);
 esp_err_t relay_manager_on_for(uint8_t relay, uint32_t seconds);
 esp_err_t relay_manager_force_on(uint8_t relay);
 esp_err_t relay_manager_force_off(uint8_t relay);

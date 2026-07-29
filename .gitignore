@@ -2,5 +2,7 @@ build/
 dist/
 managed_components/
 power4ctl/power4ctl
+power4ctl/test_sha256
 power4ctl/*.o
 power4ctl/*.deb
+*.password

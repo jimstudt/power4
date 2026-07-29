@@ -27,6 +27,11 @@ BAUD ?= 115200
 BUILD_DIR ?= build
 PACKAGE_DIR ?= dist/power4-firmware
 PACKAGE_TARBALL ?= $(PACKAGE_DIR).tar.gz
+SUPPORTED_BOARDS := relay-6ch poe-8ro
+BOARD_CONFIG_OFFSET := 0x1a000
+BOARD_CONFIG_SIZE := 0x4000
+NVS_GEN_PY ?= $(if $(strip $(IDF_PYTHON_ENV_PATH)),$(IDF_PYTHON_ENV_PATH)/bin/python,python3)
+NVS_GEN ?= $(IDF_PATH)/components/nvs_flash/nvs_partition_generator/nvs_partition_gen.py
 
 export IDF_TARGET
 
@@ -41,18 +46,26 @@ ifneq ($(strip $(BUILD_DIR)),)
 IDF_ARGS += -B $(BUILD_DIR)
 endif
 
-.PHONY: all build package flash monitor menuconfig clean fullclean erase-flash size reconfigure set-target power4ctl power4ctl-clean deb help
+.PHONY: all build test package flash monitor menuconfig clean fullclean erase-flash size reconfigure set-target power4ctl power4ctl-clean deb help
 
 all: build
 
 build:
-	$(IDF_PY) $(IDF_ARGS) build
+	$(IDF_PY) $(IDF_ARGS) -DPOWER4_BOARD= build
+
+test:
+	python3 tests/validate_board_profiles.py
+	$(MAKE) -C power4ctl test
 
 package: build
-	@mkdir -p "$(PACKAGE_DIR)/bootloader" "$(PACKAGE_DIR)/partition_table"
+	@mkdir -p "$(PACKAGE_DIR)/bootloader" "$(PACKAGE_DIR)/partition_table" "$(PACKAGE_DIR)/board_config"
 	@cp "$(BUILD_DIR)/bootloader/bootloader.bin" "$(PACKAGE_DIR)/bootloader/bootloader.bin"
 	@cp "$(BUILD_DIR)/partition_table/partition-table.bin" "$(PACKAGE_DIR)/partition_table/partition-table.bin"
 	@cp "$(BUILD_DIR)/power4.bin" "$(PACKAGE_DIR)/power4.bin"
+	@$(NVS_GEN_PY) "$(NVS_GEN)" generate --version 2 \
+		"board_profiles/relay-6ch.csv" "$(PACKAGE_DIR)/board_config/relay-6ch.bin" "$(BOARD_CONFIG_SIZE)"
+	@$(NVS_GEN_PY) "$(NVS_GEN)" generate --version 2 \
+		"board_profiles/poe-8ro.csv" "$(PACKAGE_DIR)/board_config/poe-8ro.bin" "$(BOARD_CONFIG_SIZE)"
 	@sed \
 		-e 's/--flash-mode/--flash_mode/g' \
 		-e 's/--flash-freq/--flash_freq/g' \
@@ -61,10 +74,13 @@ package: build
 	@printf '%s\n' \
 		'#!/bin/sh' \
 		'set -eu' \
+		'if [ "$$#" -ne 1 ]; then echo "usage: $$0 relay-6ch|poe-8ro" >&2; exit 2; fi' \
+		'BOARD="$$1"' \
+		'case "$$BOARD" in relay-6ch|poe-8ro) ;; *) echo "unknown board: $$BOARD" >&2; exit 2 ;; esac' \
 		'PORT="$${PORT:-/dev/ttyACM0}"' \
 		'BAUD="$${BAUD:-115200}"' \
 		'ESPTOOL="$${ESPTOOL:-esptool}"' \
-		'exec "$$ESPTOOL" --chip esp32s3 -b "$$BAUD" --before default_reset --after hard_reset --no-stub -p "$$PORT" write_flash "@flash_args"' \
+		'exec "$$ESPTOOL" --chip esp32s3 -b "$$BAUD" --before default_reset --after hard_reset --no-stub -p "$$PORT" write_flash "@flash_args" "$(BOARD_CONFIG_OFFSET)" "board_config/$$BOARD.bin"' \
 		> "$(PACKAGE_DIR)/flash.sh"
 	@printf '%s\n' \
 		'#!/bin/sh' \
@@ -80,19 +96,24 @@ package: build
 		'  sudo apt install esptool picocom' \
 		'' \
 		'Flash:' \
-		'  PORT=/dev/ttyACM0 ./flash.sh' \
+		'  PORT=/dev/ttyACM0 ./flash.sh relay-6ch' \
+		'  PORT=/dev/ttyACM0 ./flash.sh poe-8ro' \
 		'' \
 		'Monitor:' \
 		'  PORT=/dev/ttyACM0 ./monitor.sh' \
 		'' \
-		'The bundle contains bootloader.bin, partition-table.bin, power4.bin, and flash_args.' \
+		'The bundle contains one shared power4.bin and one board_config image per supported board.' \
 		> "$(PACKAGE_DIR)/README.txt"
 	@chmod +x "$(PACKAGE_DIR)/flash.sh" "$(PACKAGE_DIR)/monitor.sh"
 	@COPYFILE_DISABLE=1 tar --format ustar -czf "$(PACKAGE_TARBALL)" -C "$$(dirname "$(PACKAGE_DIR)")" "$$(basename "$(PACKAGE_DIR)")"
 	@printf 'Firmware install bundle written to %s and %s\n' "$(PACKAGE_DIR)" "$(PACKAGE_TARBALL)"
 
 flash:
-	$(IDF_PY) $(IDF_ARGS) flash
+	@case " $(SUPPORTED_BOARDS) " in \
+		*" $(BOARD) "*) ;; \
+		*) printf 'BOARD must be one of: %s\n' "$(SUPPORTED_BOARDS)" >&2; exit 2 ;; \
+	esac
+	$(IDF_PY) $(IDF_ARGS) -DPOWER4_BOARD=$(BOARD) flash
 
 monitor:
 	$(IDF_PY) $(IDF_ARGS) monitor
@@ -131,8 +152,10 @@ help:
 	@printf '%s\n' \
 		'power4 make targets:' \
 		'  make build        Build firmware with ESP-IDF' \
+		'  make test         Run board-profile and power4ctl protocol tests' \
 		'  make package      Build and bundle binaries for Raspberry Pi flashing' \
-		'  make flash        Flash firmware; set PORT=/dev/tty...' \
+		'  make flash BOARD=relay-6ch|poe-8ro' \
+		'                    Flash firmware and the selected hardware profile' \
 		'  make monitor      Open ESP-IDF serial monitor' \
 		'  make menuconfig   Open ESP-IDF configuration UI' \
 		'  make clean        Remove build outputs' \
@@ -150,4 +173,5 @@ help:
 		'  PORT=...          Serial port, default: /dev/tty.usbmodem1101' \
 		'  BAUD=...          Serial baud rate, default: 115200' \
 		'  BUILD_DIR=...     ESP-IDF build directory, default: build' \
-		'  PACKAGE_DIR=...   Firmware bundle directory, default: dist/power4-firmware'
+		'  PACKAGE_DIR=...   Firmware bundle directory, default: dist/power4-firmware' \
+		'  BOARD=...         Required by make flash: relay-6ch or poe-8ro'

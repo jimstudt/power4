@@ -7,8 +7,10 @@
 
 #include "battery_bank.hpp"
 #include "config_flags.hpp"
+#include "input_manager.hpp"
 #include "policy_storage.hpp"
 #include "relay_manager.hpp"
+#include "rtc_manager.hpp"
 #include "esp_err.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
@@ -137,6 +139,55 @@ int lua_relay_state(lua_State *state)
     }
     lua_pushinteger(state, static_cast<lua_Integer>(status.timer_remaining_s));
     return 3;
+}
+
+int lua_input_on(lua_State *state)
+{
+    const lua_Integer input = luaL_checkinteger(state, 1);
+    if (input < 1 || input > input_manager_count()) {
+        luaL_argerror(state, 1, "input number out of range");
+    }
+
+    InputStatus status = {};
+    const esp_err_t err = input_manager_query(static_cast<uint8_t>(input), &status);
+    if (err != ESP_OK) {
+        return luaL_error(state,
+                          "input_on(%u) failed: %s",
+                          static_cast<unsigned>(input),
+                          esp_err_to_name(err));
+    }
+
+    lua_pushboolean(state, status.on);
+    return 1;
+}
+
+void lua_set_integer_field(lua_State *state, const char *name, lua_Integer value)
+{
+    lua_pushinteger(state, value);
+    lua_setfield(state, -2, name);
+}
+
+int lua_rtc_time(lua_State *state)
+{
+    RtcDateTime value = {};
+    const esp_err_t err = rtc_manager_read(&value);
+    if (err != ESP_OK) {
+        return luaL_error(state, "rtc_time() failed: %s", esp_err_to_name(err));
+    }
+
+    lua_createtable(state, 0, 9);
+    lua_set_integer_field(state, "year", value.year);
+    lua_set_integer_field(state, "month", value.month);
+    lua_set_integer_field(state, "day", value.day);
+    lua_set_integer_field(state, "weekday", value.weekday);
+    lua_set_integer_field(state, "hour", value.hour);
+    lua_set_integer_field(state, "minute", value.minute);
+    lua_set_integer_field(state, "second", value.second);
+    lua_pushboolean(state, !value.oscillator_stopped);
+    lua_setfield(state, -2, "valid");
+    lua_pushboolean(state, value.oscillator_stopped);
+    lua_setfield(state, -2, "oscillator_stopped");
+    return 1;
 }
 
 int lua_config_is_set(lua_State *state)
@@ -347,6 +398,10 @@ void register_policy_lua_functions(lua_State *state)
     lua_setglobal(state, "relay_off");
     lua_pushcfunction(state, lua_relay_state);
     lua_setglobal(state, "relay_state");
+    lua_pushcfunction(state, lua_input_on);
+    lua_setglobal(state, "input_on");
+    lua_pushcfunction(state, lua_rtc_time);
+    lua_setglobal(state, "rtc_time");
     lua_pushcfunction(state, lua_config_is_set);
     lua_setglobal(state, "config_is_set");
     lua_pushcfunction(state, lua_config_number);

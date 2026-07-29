@@ -1,6 +1,8 @@
 idf_component_register(
     SRCS
         "ble_manager.cpp"
+        "board_config.cpp"
+        "board_i2c.cpp"
         "battery_bank.cpp"
         "battery_scanner.cpp"
         "battery_store.cpp"
@@ -8,13 +10,17 @@ idf_component_register(
         "config_gatt.cpp"
         "config_flags.cpp"
         "console.cpp"
+        "ethernet_manager.cpp"
+        "input_manager.cpp"
         "json_output.cpp"
         "log_buffer.cpp"
         "main.cpp"
+        "network_console.cpp"
         "policy_task.cpp"
         "policy_storage.cpp"
         "relay_gatt.cpp"
         "relay_manager.cpp"
+        "rtc_manager.cpp"
         "utils.cpp"
     INCLUDE_DIRS
         "."
@@ -23,16 +29,33 @@ idf_component_register(
         bt
         esp_app_format
         esp_driver_gpio
+        esp_driver_i2c
+        esp_driver_spi
+        esp_eth
+        esp_event
         esp_driver_usb_serial_jtag
         esp_hw_support
         esp_partition
         esp_system
         esp_timer
+        esp_netif
         freertos
         heap
         log
         lua
+        lwip
         mbedtls
         nvs_flash
         spi_flash
 )
+
+if(DEFINED POWER4_BOARD AND NOT "${POWER4_BOARD}" STREQUAL "")
+    if(NOT POWER4_BOARD STREQUAL "relay-6ch" AND NOT POWER4_BOARD STREQUAL "poe-8ro")
+        message(FATAL_ERROR "Unknown POWER4_BOARD '${POWER4_BOARD}'")
+    endif()
+    nvs_create_partition_image(
+        board_config
+        "${CMAKE_SOURCE_DIR}/board_profiles/${POWER4_BOARD}.csv"
+        FLASH_IN_PROJECT
+    )
+endif()

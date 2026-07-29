@@ -1,10 +1,16 @@
-.TH POWER4CTL 1 "July 2026" "power4ctl 1.0.1" "User Commands"
+.TH POWER4CTL 1 "July 29, 2026" "power4ctl" "User Commands"
 .SH NAME
-power4ctl \- serial management tool for the power4 ESP32 device
+power4ctl \- serial and authenticated TCP management tool for power4
 .SH SYNOPSIS
 .B power4ctl
 .RB [ \-p
 .IR port ]
+.RB [ \-a
+.IR address ]
+.RB [ \-e
+.IR environment-name ]
+.RB [ \-f
+.IR password-file ]
 .RB [ \-b
 .IR baud ]
 .RB [ \-t
@@ -16,6 +22,12 @@ power4ctl \- serial management tool for the power4 ESP32 device
 .B power4ctl
 .RB [ \-p
 .IR port ]
+.RB [ \-a
+.IR address ]
+.RB [ \-e
+.IR environment-name ]
+.RB [ \-f
+.IR password-file ]
 .RB [ \-b
 .IR baud ]
 .RB [ \-t
@@ -25,6 +37,12 @@ power4ctl \- serial management tool for the power4 ESP32 device
 .B power4ctl
 .RB [ \-p
 .IR port ]
+.RB [ \-a
+.IR address ]
+.RB [ \-e
+.IR environment-name ]
+.RB [ \-f
+.IR password-file ]
 .RB [ \-b
 .IR baud ]
 .RB [ \-t
@@ -39,10 +57,29 @@ power4ctl \- serial management tool for the power4 ESP32 device
 .IR outdir ]
 .SH DESCRIPTION
 .B power4ctl
-communicates with a power4 ESP32 device over its serial console.
-It opens the port, acquires an exclusive lock, elicits the
+communicates with a power4 ESP32 device over its serial console or its
+authenticated TCP console.
+It opens the selected transport, elicits the
 .B power4>
-prompt, issues a command, and returns the result.
+prompt, issues a tool-framed command, and returns the result.
+.PP
+On both serial and TCP transports,
+.B power4ctl
+sends
+.BR "p4exec " command .
+The device streams the command output using SMTP-style dot stuffing:
+a line beginning with a dot has that dot doubled, and a single dot on a line
+by itself terminates the response.
+.B power4ctl
+removes the stuffing before writing the result to standard output.
+The interactive prompt is not used as the response terminator.
+Direct human console commands retain the ordinary prompt behavior.
+.PP
+TCP mode connects to IPv4 port 4244.
+The device supplies a random challenge and
+.B power4ctl
+answers with HMAC-SHA256 using the configured password.
+The authenticated session then carries a clear-text console stream.
 .PP
 For the
 .BR "json " commands,
@@ -59,10 +96,9 @@ validates the length and SHA-1 checksum before printing the JSON object
 to standard output.
 Log lines and other console noise from the device are silently ignored.
 .PP
-Any command not listed below is sent verbatim to the device and all
-output lines are echoed to standard output until the
-.B power4>
-prompt returns.
+Any command not listed below is sent as a tool-framed console command and all
+unstuffed output lines are echoed to standard output through the terminating
+dot line.
 .PP
 When invoked without a command argument,
 .B power4ctl
@@ -106,6 +142,23 @@ Serial port to use.
 Default:
 .IR /dev/ttyACM0 .
 .TP
+.BI \-a " address"
+Use the authenticated TCP console at this IPv4 address instead of serial.
+Exactly one of
+.B \-e
+or
+.B \-f
+is required.
+.TP
+.BI \-e " environment-name"
+Read the TCP password from the named environment variable.
+The value is used exactly and must contain 16 to 128 printable bytes.
+.TP
+.BI \-f " password-file"
+Read the TCP password from a file.
+Leading and trailing whitespace is removed before validating the 16 to 128
+printable byte password.
+.TP
 .BI \-b " baud"
 Baud rate.
 Default:
@@ -132,7 +185,7 @@ or
 .TP
 .B \-D
 Daemon mode.
-Run forever, collecting all three JSON reports on a periodic loop.
+Run forever, collecting all four JSON reports on a periodic loop.
 Takes no command arguments.
 Terminated cleanly by
 .B SIGTERM
@@ -253,6 +306,7 @@ exits immediately with an error rather than waiting.
 In daemon mode, the lock attempt is retried every 500\ ms for up to
 .I lock\-seconds
 seconds (default\ 5) before the cycle is skipped.
+These locks apply only to serial connections.
 .SH NOTES
 The port is configured in raw 8N1 mode with the requested baud rate and
 no hardware flow control.
@@ -265,6 +319,10 @@ Up to three attempts are made, sharing the timeout evenly.
 .PP
 SHA-1 verification uses a self-contained FIPS\~180-4 implementation with
 no external library dependency.
+.PP
+TCP authentication uses HMAC-SHA256.
+It authenticates access to the console but does not encrypt the subsequent
+commands or responses.
 .SH SEE ALSO
 .BR picocom (1),
 .BR esptool (1),
