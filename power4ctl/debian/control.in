@@ -2,7 +2,7 @@ Package: power4ctl
 Version: @VERSION@
 Architecture: @ARCH@
 Maintainer: Jim Studt <jim@studt.net>
-Depends: libc6
+Depends: libc6, libedit2
 Section: utils
 Priority: optional
 Description: Serial management tool for the power4 ESP32 device

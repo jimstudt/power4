@@ -21,6 +21,15 @@ power4ctl \- serial management tool for the power4 ESP32 device
 .RB [ \-t
 .IR seconds ]
 .RB [ \-v ]
+.PP
+.B power4ctl
+.RB [ \-p
+.IR port ]
+.RB [ \-b
+.IR baud ]
+.RB [ \-t
+.IR seconds ]
+.RB [ \-v ]
 .B \-D
 .RB [ \-i
 .IR interval ]
@@ -54,6 +63,26 @@ Any command not listed below is sent verbatim to the device and all
 output lines are echoed to standard output until the
 .B power4>
 prompt returns.
+.PP
+When invoked without a command argument,
+.B power4ctl
+enters an interactive REPL.
+Commands are read from standard input using
+.BR libedit (3)
+line editing with Emacs key bindings and persistent command history
+(see
+.B FILES
+below).
+The serial port is opened for each command and closed again before the
+next prompt is issued, so other tools may use the port between commands.
+Type
+.B exit
+or
+.BR quit ,
+or press
+.BR Ctrl\-D ,
+to leave the REPL.
+The same commands accepted on the command line are accepted in the REPL.
 .PP
 In daemon mode
 .RB ( \-D ),
@@ -203,6 +232,10 @@ A message is printed to standard error.
 .TP
 .I /dev/ttyACM0
 Default serial port (USB CDC ACM, used by the ESP32 USB-JTAG/Serial interface).
+.TP
+.I ~/.power4ctl_history
+REPL command history file, read at startup and written on exit.
+Up to 200 entries are retained.
 .TP
 .I /run/power4/
 Default daemon output directory.

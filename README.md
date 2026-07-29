@@ -430,6 +430,7 @@ sudo dpkg -i power4ctl/power4ctl_1.0.1_arm64.deb
 
 ```text
 power4ctl [-p port] [-b baud] [-t seconds] [-v] command [args...]
+power4ctl [-p port] [-b baud] [-t seconds] [-v]
 power4ctl [-p port] [-b baud] [-t seconds] [-v] -D [-i interval] [-l lock-seconds] [-o outdir]
 
 Options:
@@ -473,6 +474,17 @@ power4ctl show system
 power4ctl set relay 1 on 30
 power4ctl policy accept
 power4ctl help
+```
+
+**Interactive REPL** — invoked with no command, enters a line-editing shell
+(powered by libedit) with Emacs key bindings and persistent command history
+in `~/.power4ctl_history`. The serial port is opened for each command and
+released before the next prompt, so other tools can interleave. Type `exit`,
+`quit`, or press Ctrl-D to leave:
+
+```sh
+power4ctl
+power4ctl -p /dev/ttyACM1
 ```
 
 **Daemon mode** — run indefinitely, polling the device every 60 seconds and

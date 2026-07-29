@@ -8,6 +8,7 @@ ifeq ($(VERSION),)
 $(error cannot read version from ../version.txt)
 endif
 OBJS     = power4ctl.o sha1.o
+LIBS     = -ledit
 
 BINDIR      = /usr/local/bin
 MANDIR      = /usr/local/share/man/man1
@@ -27,7 +28,7 @@ PKGFILE  = $(TARGET)_$(VERSION)_$(ARCH).deb
 all: $(TARGET)
 
 $(TARGET): $(OBJS)
-	$(CC) $(CFLAGS) -o $(TARGET) $(OBJS)
+	$(CC) $(CFLAGS) -o $(TARGET) $(OBJS) $(LIBS)
 
 power4ctl.o: power4ctl.c sha1.h
 	$(CC) $(CFLAGS) -c -o $@ power4ctl.c

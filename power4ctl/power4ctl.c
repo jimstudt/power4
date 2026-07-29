@@ -2,6 +2,7 @@
  * power4ctl — serial management tool for the power4 ESP32 device
  *
  * Usage: power4ctl [-p port] [-b baud] [-t seconds] [-v] command
+ *        power4ctl [-p port] [-b baud] [-t seconds] [-v]
  *        power4ctl [-p port] [-b baud] [-t seconds] [-v] \
  *                  -D [-i interval] [-l lock-seconds] [-o outdir]
  *
@@ -9,6 +10,11 @@
  *   json batteries / banks / logs / relays
  *   stage <filename>
  *   <anything else>   sent verbatim; output echoed to stdout
+ *
+ * Interactive (REPL) mode — invoked with no command argument:
+ *   Reads commands from stdin with libedit line editing and history.
+ *   The serial port is opened per command and closed between prompts.
+ *   "exit" or "quit" (or Ctrl-D) end the session.
  *
  * Daemon mode (-D):
  *   Loops forever, opening the serial port each cycle, collecting the JSON
@@ -23,6 +29,7 @@
 #include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <histedit.h>
 #include <limits.h>
 #include <signal.h>
 #include <stdarg.h>
@@ -668,6 +675,98 @@ static int read_response(int fd, const struct timespec *deadline,
 }
 
 /* ------------------------------------------------------------------ */
+/* Command dispatch                                                     */
+/* ------------------------------------------------------------------ */
+
+static const char *g_port         = "/dev/ttyACM0";
+static int         g_baud         = 115200;
+static int         g_timeout      = 2;
+static int         g_daemon       = 0;
+static int         g_interval     = 60;
+static int         g_lock_timeout = 5;
+static const char *g_outdir       = "/run/power4";
+
+/*
+ * Open the serial port, execute one command, close the port.
+ * cmd is the full command string, e.g. "json batteries", "stage foo.lua",
+ * or any passthrough command like "show relays".
+ * Returns 0 on success, 1 on error.
+ */
+static int run_device_command(const char *cmd)
+{
+    int fd, result;
+    struct timespec deadline;
+
+    if (strncmp(cmd, "stage", 5) == 0 && (cmd[5] == ' ' || cmd[5] == '\0')) {
+        const char *filename = cmd + 5;
+        while (*filename == ' ') filename++;
+        if (*filename == '\0') {
+            fprintf(stderr, "usage: stage <filename>\n");
+            return 1;
+        }
+        fd = open_serial(g_port, g_baud);
+        if (fd < 0) return 1;
+        deadline = deadline_from_now(g_timeout);
+        if (!wait_for_prompt(fd, &deadline)) {
+            fprintf(stderr, "%s: timed out waiting for prompt\n", g_port);
+            close(fd);
+            return 1;
+        }
+        result = do_stage(fd, filename, &deadline);
+        close(fd);
+        return result == 1 ? 0 : 1;
+    }
+
+    fd = open_serial(g_port, g_baud);
+    if (fd < 0) return 1;
+    deadline = deadline_from_now(g_timeout);
+
+    if (!wait_for_prompt(fd, &deadline)) {
+        fprintf(stderr, "%s: timed out waiting for prompt\n", g_port);
+        close(fd);
+        return 1;
+    }
+
+    if (strncmp(cmd, "json ", 5) == 0) {
+        char dev_cmd[128];
+        int llen = snprintf(dev_cmd, sizeof(dev_cmd), "report%s\r", cmd + 4);
+        verbose_bytes(">>>", dev_cmd, (size_t)llen);
+        if (write(fd, dev_cmd, (size_t)llen) < 0) {
+            fprintf(stderr, "%s: write: %s\n", g_port, strerror(errno));
+            close(fd);
+            return 1;
+        }
+        result = read_response(fd, &deadline, NULL, 0);
+        close(fd);
+        if (result == 1) return 0;
+        if (result == 0)
+            fprintf(stderr, "%s: timed out waiting for response\n", g_port);
+        return 1;
+    }
+
+    /* Passthrough: send verbatim with \r, echo output to stdout */
+    {
+        size_t cmdlen = strlen(cmd);
+        char line[1026];
+        int llen;
+        if (cmdlen > sizeof(line) - 2)
+            cmdlen = sizeof(line) - 2;
+        llen = snprintf(line, sizeof(line), "%.*s\r", (int)cmdlen, cmd);
+        verbose_bytes(">>>", line, (size_t)llen);
+        if (write(fd, line, (size_t)llen) < 0) {
+            fprintf(stderr, "%s: write: %s\n", g_port, strerror(errno));
+            close(fd);
+            return 1;
+        }
+    }
+    result = read_passthrough(fd, &deadline);
+    close(fd);
+    if (result == 0)
+        fprintf(stderr, "%s: timed out waiting for prompt\n", g_port);
+    return result == 1 ? 0 : 1;
+}
+
+/* ------------------------------------------------------------------ */
 /* Daemon support                                                       */
 /* ------------------------------------------------------------------ */
 
@@ -709,18 +808,6 @@ static int write_json_atomic(const char *dir, const char *name, const char *json
     }
     return 0;
 }
-
-/* ------------------------------------------------------------------ */
-/* Main                                                                 */
-/* ------------------------------------------------------------------ */
-
-static const char *g_port         = "/dev/ttyACM0";
-static int         g_baud         = 115200;
-static int         g_timeout      = 2;
-static int         g_daemon       = 0;
-static int         g_interval     = 60;
-static int         g_lock_timeout = 5;
-static const char *g_outdir       = "/run/power4";
 
 static const char * const REPORTS[] = {"batteries", "banks", "relays", "logs"};
 #define NREPORTS ((int)(sizeof(REPORTS) / sizeof(REPORTS[0])))
@@ -803,10 +890,90 @@ static void do_daemon(void)
     }
 }
 
+/* ------------------------------------------------------------------ */
+/* REPL                                                                 */
+/* ------------------------------------------------------------------ */
+
+static char *repl_prompt(EditLine *el)
+{
+    (void)el;
+    static char p[] = "power4ctl> ";
+    return p;
+}
+
+static void do_repl(void)
+{
+    EditLine *el;
+    History  *hist;
+    HistEvent ev;
+    char      histpath[512];
+    const char *histfile = NULL;
+    const char *home;
+    const char *raw;
+    int count;
+
+    home = getenv("HOME");
+    if (home != NULL &&
+        snprintf(histpath, sizeof(histpath), "%s/.power4ctl_history", home)
+            < (int)sizeof(histpath))
+        histfile = histpath;
+
+    hist = history_init();
+    history(hist, &ev, H_SETSIZE, 200);
+
+    el = el_init("power4ctl", stdin, stdout, stderr);
+    el_set(el, EL_PROMPT, repl_prompt);
+    el_set(el, EL_HIST, history, hist);
+    el_set(el, EL_EDITOR, "emacs");
+
+    if (histfile != NULL)
+        history(hist, &ev, H_LOAD, histfile);
+
+    while ((raw = el_gets(el, &count)) != NULL) {
+        const char *p, *end;
+        char cmd[1024];
+        size_t len;
+
+        /* Trim leading/trailing whitespace including the trailing newline */
+        p = raw;
+        while (*p == ' ' || *p == '\t') p++;
+        end = p + strlen(p);
+        while (end > p && (end[-1] == '\n' || end[-1] == '\r' ||
+                           end[-1] == ' '  || end[-1] == '\t'))
+            end--;
+
+        len = (size_t)(end - p);
+        if (len == 0)
+            continue;
+        if (len >= sizeof(cmd))
+            len = sizeof(cmd) - 1;
+        memcpy(cmd, p, len);
+        cmd[len] = '\0';
+
+        if (strcmp(cmd, "exit") == 0 || strcmp(cmd, "quit") == 0)
+            break;
+
+        history(hist, &ev, H_ENTER, raw);
+        run_device_command(cmd);
+    }
+    fputc('\n', stdout);
+
+    if (histfile != NULL)
+        history(hist, &ev, H_SAVE, histfile);
+
+    el_end(el);
+    history_end(hist);
+}
+
+/* ------------------------------------------------------------------ */
+/* Main                                                                 */
+/* ------------------------------------------------------------------ */
+
 static void usage(void)
 {
     fprintf(stderr,
-            "usage: power4ctl [-p port] [-b baud] [-t seconds] [-v] command\n"
+            "usage: power4ctl [-p port] [-b baud] [-t seconds] [-v] command [args...]\n"
+            "       power4ctl [-p port] [-b baud] [-t seconds] [-v]\n"
             "       power4ctl [-p port] [-b baud] [-t seconds] [-v]\n"
             "                 -D [-i interval] [-l lock-seconds] [-o outdir]\n"
             "\n"
@@ -826,14 +993,15 @@ static void usage(void)
             "  json logs\n"
             "  json relays\n"
             "  stage <filename>\n"
-            "  <anything else>   sent verbatim; output echoed to stdout\n");
+            "  <anything else>   sent verbatim; output echoed to stdout\n"
+            "\n"
+            "  Invoked with no command: enter interactive REPL mode.\n"
+            "  Type 'exit' or 'quit', or press Ctrl-D to leave the REPL.\n");
 }
 
 int main(int argc, char **argv)
 {
-    char command[128];
-    int fd, i, opt, result;
-    struct timespec deadline;
+    int opt;
 
     while ((opt = getopt(argc, argv, "p:b:t:vDi:l:o:")) != -1) {
         switch (opt) {
@@ -861,86 +1029,24 @@ int main(int argc, char **argv)
         return 0;
     }
 
+    /* No command: interactive REPL */
     if (optind >= argc) {
-        usage();
-        return 1;
+        do_repl();
+        return 0;
     }
 
-    if (strcmp(argv[optind], "stage") == 0) {
-        if (argc - optind != 2) {
-            usage();
-            return 1;
-        }
-        fd = open_serial(g_port, g_baud);
-        if (fd < 0)
-            return 1;
-        deadline = deadline_from_now(g_timeout);
-        if (!wait_for_prompt(fd, &deadline)) {
-            fprintf(stderr, "%s: timed out waiting for prompt\n", g_port);
-            close(fd);
-            return 1;
-        }
-        result = do_stage(fd, argv[optind + 1], &deadline);
-        close(fd);
-        return result == 1 ? 0 : 1;
-    }
-
-    command[0] = '\0';
-    for (i = optind; i < argc; i++) {
-        if (i > optind)
-            strncat(command, " ", sizeof(command) - strlen(command) - 1);
-        strncat(command, argv[i], sizeof(command) - strlen(command) - 1);
-    }
-
-    fd = open_serial(g_port, g_baud);
-    if (fd < 0)
-        return 1;
-
-    deadline = deadline_from_now(g_timeout);
-
-    if (!wait_for_prompt(fd, &deadline)) {
-        fprintf(stderr, "%s: timed out waiting for prompt\n", g_port);
-        close(fd);
-        return 1;
-    }
-
-    if (strcmp(command, "json batteries") == 0 ||
-        strcmp(command, "json banks")     == 0 ||
-        strcmp(command, "json logs")      == 0 ||
-        strcmp(command, "json relays")    == 0) {
-        /* "json X" → send "report X\r" to device, expect P4J1 response */
-        char dev_cmd[sizeof(command) + 2];
-        int llen = snprintf(dev_cmd, sizeof(dev_cmd), "report%s\r", command + 4);
-        verbose_bytes(">>>", dev_cmd, (size_t)llen);
-        if (write(fd, dev_cmd, (size_t)llen) < 0) {
-            fprintf(stderr, "%s: write: %s\n", g_port, strerror(errno));
-            close(fd);
-            return 1;
-        }
-        result = read_response(fd, &deadline, NULL, 0);
-        close(fd);
-        if (result == 1)
-            return 0;
-        if (result == 0)
-            fprintf(stderr, "%s: timed out waiting for response\n", g_port);
-        return 1;
-    }
-
-    /* Passthrough: send command verbatim and echo all output to stdout */
+    /* Single-shot command: build command string from remaining argv */
     {
-        char line[sizeof(command) + 2];
-        int llen = snprintf(line, sizeof(line), "%s\r", command);
-        verbose_bytes(">>>", line, (size_t)llen);
-        if (write(fd, line, (size_t)llen) < 0) {
-            fprintf(stderr, "%s: write: %s\n", g_port, strerror(errno));
-            close(fd);
-            return 1;
-        }
-    }
+        char command[1024];
+        int i;
 
-    result = read_passthrough(fd, &deadline);
-    close(fd);
-    if (result == 0)
-        fprintf(stderr, "%s: timed out waiting for prompt\n", g_port);
-    return result == 1 ? 0 : 1;
+        command[0] = '\0';
+        for (i = optind; i < argc; i++) {
+            if (i > optind)
+                strncat(command, " ", sizeof(command) - strlen(command) - 1);
+            strncat(command, argv[i], sizeof(command) - strlen(command) - 1);
+        }
+
+        return run_device_command(command);
+    }
 }
