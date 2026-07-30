@@ -198,6 +198,8 @@ show policy parameters
 show debug
 show logs
 show time
+show timezone
+show timezones
 ```
 
 `show logs` prints the most recent system log text, kept in a 16 KB rolling
@@ -249,7 +251,8 @@ set relay 1 on 30
 set relay 1 force-on
 set relay 1 force-off
 set relay 1 clear-force
-set time 2026-07-29 14:30:00
+set timezone US/Central
+set time 2026-07-29 19:30:00
 ```
 
 Ethernet address and PHY settings are stored in the normal writable NVS
@@ -277,10 +280,22 @@ configured digital input. Boards without digital inputs report `not present`.
 Inputs are sampled when requested; firmware does not currently debounce them
 or attach actions directly to input edges.
 
-The RTC commands use local wall time and do not apply a timezone conversion.
-`show time` reports an oscillator-stopped condition instead of silently
-treating an uninitialized clock as valid. Lua policy can read the RTC, but
-there are not yet any built-in time-of-day predicates.
+The RTC stores UTC. At boot, a valid RTC seeds the POSIX system clock. On an
+Ethernet board, the firmware then starts an SNTP client using Cloudflare's
+anycast NTP server at `162.159.200.123`; each successful synchronization
+updates the system clock and writes UTC back to the RTC. If the RTC is unset,
+the system clock remains invalid until SNTP succeeds.
+
+`set time` accepts a UTC timestamp and updates both the RTC and the system
+clock. `show time` prints UTC and local civil time plus the clock source.
+`set timezone US/Central` persists the timezone in NVS and applies the POSIX
+rule `CST6CDT,M3.2.0/2,M11.1.0/2`, including automatic modern US daylight
+saving transitions. `UTC` is the default. `show timezones` lists the 30
+supported single-token human names with their three- or four-letter standard
+abbreviation and POSIX rule; use one of those human names with `set timezone`.
+`show timezone` displays the selected name, POSIX rule, current abbreviation,
+and SNTP state. After installing firmware with the UTC convention on a unit
+whose RTC was previously set to local wall time, set the clock to UTC once.
 
 A forced relay ignores its policy timer: `force-off` keeps the relay open no
 matter what policy does (for example, while working on wiring) and `force-on`
@@ -374,7 +389,8 @@ relay_on(1, 3600) -- keep relay 1 on for an hour (1..86400 seconds)
 relay_off(1)  -- clear relay 1's policy timer
 on, force, remaining = relay_state(1) -- output state, force ("on"/"off"/nil), timer seconds left
 input_on(1) -- true when configured digital input 1 is asserted
-now = rtc_time() -- table: year, month, day, weekday (0=Sunday), hour, minute, second, valid, oscillator_stopped
+now = rtc_time() -- UTC table: year, month, day, weekday (0=Sunday), hour, minute, second, valid, oscillator_stopped, utc
+local_now = local_time() -- timezone-adjusted system time with valid, utc_offset_minutes, daylight_saving, zone, and timezone
 config_is_set("generator_ok") -- true only when defined true
 config_bool("allow-generator", true) -- boolean parameter, or the default (nil if omitted) when unset
 config_number("b24_low_limit", 40) -- numeric parameter, or the default (nil if omitted) when unset
@@ -388,6 +404,9 @@ names = battery_bank_names()
 `rtc_time()` raises a policy error when the RTC is absent or cannot be read.
 When the RTC can be read but has reported an oscillator stop, the returned
 table has `valid=false` and `oscillator_stopped=true`.
+`local_time()` uses the configured POSIX timezone and returns `valid=false`
+until the system clock has been seeded from the RTC, set manually, or
+synchronized through SNTP.
 
 Policy program command examples:
 
@@ -401,7 +420,10 @@ policy accept
 `policy upload` reads base64-encoded policy text from the console until a
 blank line or a line containing a non-base64 character. The checksum is SHA-1 of
 the decoded policy bytes, written as hexadecimal. The staged NVS key is updated
-only after the decoded bytes match the requested checksum.
+only after the decoded bytes match the requested checksum. Policy source is
+limited to 16 KiB. The full-size upload, stored-policy read, and active-policy
+source buffers are heap allocated; policy-sized arrays are not placed on a
+FreeRTOS task stack.
 
 On a Raspberry Pi, one way to compute the checksum and prepare the upload is:
 
@@ -617,10 +639,14 @@ single authenticated session and command serialization.
 
 `examples/house.lua` is the house load-shedding policy. It coordinates the
 Ethernet, admin-computer, internet, powered-Ethernet, and porch-camera relays
-from externally maintained power, daylight, schedule, force, and deep-sleep
-flags plus two physical mode inputs. Its precedence and overlap behavior are
-covered by `examples/house_test.lua`. DI1 is the occupied switch and powers
-the five named loads; DI2 requests all eight relay channels:
+from externally maintained power, force, and deep-sleep flags plus two
+physical mode inputs. It uses `local_time()` and the configured system
+timezone to compute daylight, sunrise, noon, and sunset windows for latitude
+45.127778, longitude -87.246944. No seasonal policy flag is needed. The
+sunrise, local-noon, and sunset windows span five minutes before through five
+minutes after each event. Its precedence and overlap behavior are covered by
+`examples/house_test.lua`. DI1 is the occupied switch and powers the five named
+loads; DI2 requests all eight relay channels:
 
 ```sh
 lua examples/house_test.lua examples/house.lua

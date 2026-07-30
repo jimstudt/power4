@@ -13,6 +13,7 @@
 #include "policy_storage.hpp"
 #include "relay_manager.hpp"
 #include "rtc_manager.hpp"
+#include "time_manager.hpp"
 
 #include "esp_check.h"
 #include "esp_log.h"
@@ -31,6 +32,7 @@ extern "C" void app_main(void)
     ESP_LOGI(kTag, "starting power4");
     ESP_ERROR_CHECK(policy_storage_init());
     ESP_ERROR_CHECK(network_console_init());
+    ESP_ERROR_CHECK(time_manager_init());
     ESP_ERROR_CHECK(battery_store_init());
     ESP_ERROR_CHECK(battery_bank_init());
 
@@ -72,6 +74,13 @@ extern "C" void app_main(void)
             const esp_err_t rtc_err = rtc_manager_start(*board);
             if (rtc_err != ESP_OK) {
                 ESP_LOGE(kTag, "RTC unavailable: %s", esp_err_to_name(rtc_err));
+            } else {
+                const esp_err_t seed_err = time_manager_seed_from_rtc();
+                if (seed_err != ESP_OK) {
+                    ESP_LOGW(kTag,
+                             "system time not seeded from RTC: %s",
+                             esp_err_to_name(seed_err));
+                }
             }
         }
 
@@ -82,6 +91,13 @@ extern "C" void app_main(void)
             } else {
                 ethernet_ready = true;
             }
+        }
+    }
+
+    if (ethernet_ready) {
+        const esp_err_t sntp_err = time_manager_start_sntp();
+        if (sntp_err != ESP_OK) {
+            ESP_LOGE(kTag, "SNTP unavailable: %s", esp_err_to_name(sntp_err));
         }
     }
 

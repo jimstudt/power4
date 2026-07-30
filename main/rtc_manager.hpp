@@ -6,6 +6,9 @@
 #include "esp_err.h"
 
 struct RtcDateTime {
+    // The RTC stores a UTC calendar value. The PCF85063A has no timezone or
+    // daylight-saving state; callers that need civil time must apply their
+    // configured offset to these fields.
     uint16_t year = 0;
     uint8_t month = 0;
     uint8_t day = 0;

@@ -21,6 +21,7 @@ idf_component_register(
         "relay_gatt.cpp"
         "relay_manager.cpp"
         "rtc_manager.cpp"
+        "time_manager.cpp"
         "utils.cpp"
     INCLUDE_DIRS
         "."

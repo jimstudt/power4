@@ -55,6 +55,8 @@ build:
 
 test:
 	python3 tests/validate_board_profiles.py
+	python3 tests/validate_policy_size.py
+	python3 tests/validate_timezone.py
 	$(MAKE) -C power4ctl test
 
 package: build

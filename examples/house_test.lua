@@ -1,11 +1,20 @@
 -- Host-side behavioral tests for examples/house.lua.
 
 local POLICY = arg[1] or "examples/house.lua"
+local MAX_UPLOAD_BYTES = 16 * 1024
+
+local policy_file = assert(io.open(POLICY, "rb"))
+local policy_size = assert(policy_file:seek("end"))
+policy_file:close()
+assert(policy_size <= MAX_UPLOAD_BYTES,
+       string.format("policy is %d bytes; upload limit is %d",
+                     policy_size, MAX_UPLOAD_BYTES))
 
 local flags
 local inputs
 local relays
 local calls
+local clock
 
 function config_is_set(name)
     assert(#name >= 1 and #name <= 15 and name:match("^[%w_%-]+$"),
@@ -32,12 +41,32 @@ end
 
 function syslog(...) end
 
+function local_time()
+    local value = clock or {}
+    return {
+        year = value.year or 2026,
+        month = value.month or 1,
+        day = value.day or 1,
+        weekday = value.weekday or 4,
+        hour = value.hour or 0,
+        minute = value.minute or 0,
+        second = value.second or 0,
+        valid = value.valid ~= false,
+        utc_offset_minutes = value.utc_offset_minutes or -360,
+        daylight_saving = value.daylight_saving == true,
+        zone = value.zone or "CST",
+        timezone = "US/Central",
+        utc = false,
+    }
+end
+
 local failures = 0
 
 local function scenario(label, environment, expected)
     flags = environment.flags or {}
     inputs = environment.inputs or {}
     relays = environment.relays or {}
+    clock = environment.clock
     calls = {}
 
     dofile(POLICY)
@@ -63,29 +92,78 @@ scenario("have power runs internet",
     { flags = { havePower = true } },
     "on(2,300) on(3,300)")
 
-scenario("have power and daylight add camera",
-    { flags = { havePower = true, daylight = true } },
+scenario("have power during daylight adds camera",
+    {
+        flags = { havePower = true },
+        clock = { hour = 13 },
+    },
     "on(2,300) on(3,300) on(5,300)")
 
 scenario("daylight alone does not run camera",
-    { flags = { daylight = true } },
+    { clock = { hour = 13 } },
     "on(2,300)")
 
 scenario("scheduled interval needs normal power",
-    { flags = { dawn = true } },
+    { clock = { hour = 12 } },
     "on(2,300)")
 
-scenario("dawn with power runs network loads",
-    { flags = { havePower = true, dawn = true } },
+scenario("computed dawn runs scheduled network loads",
+    {
+        flags = { havePower = true },
+        clock = { hour = 7, minute = 23 },
+    },
     "on(1,300) on(2,300) on(3,300) on(4,300)")
 
-scenario("noon with power runs network loads",
-    { flags = { havePower = true, noon = true } },
+scenario("outside computed dawn omits scheduled loads",
+    {
+        flags = { havePower = true },
+        clock = { hour = 7, minute = 22 },
+    },
+    "on(2,300) on(3,300)")
+
+scenario("computed noon runs scheduled network loads",
+    {
+        flags = { havePower = true },
+        clock = { hour = 12 },
+    },
+    "on(1,300) on(2,300) on(3,300) on(4,300) on(5,300)")
+
+scenario("computed dusk runs scheduled network loads",
+    {
+        flags = { havePower = true },
+        clock = { hour = 16, minute = 20 },
+    },
     "on(1,300) on(2,300) on(3,300) on(4,300)")
 
-scenario("dusk with power runs network loads",
-    { flags = { havePower = true, dusk = true } },
+scenario("outside computed dusk omits scheduled loads",
+    {
+        flags = { havePower = true },
+        clock = { hour = 16, minute = 22 },
+    },
+    "on(2,300) on(3,300)")
+
+scenario("summer CDT offset computes the dawn window",
+    {
+        flags = { havePower = true },
+        clock = {
+            year = 2026,
+            month = 7,
+            day = 30,
+            hour = 5,
+            minute = 26,
+            utc_offset_minutes = -300,
+            daylight_saving = true,
+            zone = "CDT",
+        },
+    },
     "on(1,300) on(2,300) on(3,300) on(4,300)")
+
+scenario("invalid system clock disables time-dependent loads",
+    {
+        flags = { havePower = true },
+        clock = { valid = false, hour = 13 },
+    },
+    "on(2,300) on(3,300)")
 
 scenario("force internet runs admin and internet",
     { flags = { ["force-internet"] = true } },
@@ -103,8 +181,6 @@ scenario("deep sleep overrides ample power and forces",
     {
         flags = {
             amplePower = true,
-            daylight = true,
-            dawn = true,
             ["force-internet"] = true,
             ["force-wifi"] = true,
             deepSleep = true,

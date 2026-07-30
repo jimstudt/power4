@@ -11,6 +11,7 @@
 #include "policy_storage.hpp"
 #include "relay_manager.hpp"
 #include "rtc_manager.hpp"
+#include "time_manager.hpp"
 #include "esp_err.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
@@ -175,7 +176,7 @@ int lua_rtc_time(lua_State *state)
         return luaL_error(state, "rtc_time() failed: %s", esp_err_to_name(err));
     }
 
-    lua_createtable(state, 0, 9);
+    lua_createtable(state, 0, 10);
     lua_set_integer_field(state, "year", value.year);
     lua_set_integer_field(state, "month", value.month);
     lua_set_integer_field(state, "day", value.day);
@@ -187,6 +188,39 @@ int lua_rtc_time(lua_State *state)
     lua_setfield(state, -2, "valid");
     lua_pushboolean(state, value.oscillator_stopped);
     lua_setfield(state, -2, "oscillator_stopped");
+    lua_pushboolean(state, true);
+    lua_setfield(state, -2, "utc");
+    return 1;
+}
+
+int lua_local_time(lua_State *state)
+{
+    TimeSnapshot value = {};
+    const esp_err_t err = time_manager_get_time(&value);
+    if (err != ESP_OK) {
+        return luaL_error(state, "local_time() failed: %s", esp_err_to_name(err));
+    }
+
+    lua_createtable(state, 0, 14);
+    lua_set_integer_field(state, "year", value.local.tm_year + 1900);
+    lua_set_integer_field(state, "month", value.local.tm_mon + 1);
+    lua_set_integer_field(state, "day", value.local.tm_mday);
+    lua_set_integer_field(state, "weekday", value.local.tm_wday);
+    lua_set_integer_field(state, "yearday", value.local.tm_yday + 1);
+    lua_set_integer_field(state, "hour", value.local.tm_hour);
+    lua_set_integer_field(state, "minute", value.local.tm_min);
+    lua_set_integer_field(state, "second", value.local.tm_sec);
+    lua_set_integer_field(state, "utc_offset_minutes", value.utc_offset_minutes);
+    lua_pushboolean(state, value.valid);
+    lua_setfield(state, -2, "valid");
+    lua_pushboolean(state, value.local.tm_isdst > 0);
+    lua_setfield(state, -2, "daylight_saving");
+    lua_pushboolean(state, false);
+    lua_setfield(state, -2, "utc");
+    lua_pushstring(state, value.abbreviation);
+    lua_setfield(state, -2, "zone");
+    lua_pushstring(state, value.timezone_name);
+    lua_setfield(state, -2, "timezone");
     return 1;
 }
 
@@ -402,6 +436,8 @@ void register_policy_lua_functions(lua_State *state)
     lua_setglobal(state, "input_on");
     lua_pushcfunction(state, lua_rtc_time);
     lua_setglobal(state, "rtc_time");
+    lua_pushcfunction(state, lua_local_time);
+    lua_setglobal(state, "local_time");
     lua_pushcfunction(state, lua_config_is_set);
     lua_setglobal(state, "config_is_set");
     lua_pushcfunction(state, lua_config_number);

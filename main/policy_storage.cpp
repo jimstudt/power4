@@ -41,6 +41,9 @@ esp_err_t read_blob_alloc(nvs_handle_t handle, const char *key, char **contents,
     } else if (err != ESP_OK) {
         return err;
     }
+    if (stored_length > kPolicyProgramMaxBytes) {
+        return ESP_ERR_INVALID_SIZE;
+    }
 
     char *buffer = static_cast<char *>(malloc(stored_length + 1));
     if (buffer == nullptr) {
@@ -118,6 +121,9 @@ esp_err_t policy_storage_write_staged(const void *contents, size_t length)
 {
     if (contents == nullptr && length > 0) {
         return ESP_ERR_INVALID_ARG;
+    }
+    if (length > kPolicyProgramMaxBytes) {
+        return ESP_ERR_INVALID_SIZE;
     }
 
     nvs_handle_t handle = 0;

@@ -6,6 +6,8 @@
 #include "driver/i2c_master.h"
 #include "esp_check.h"
 #include "esp_log.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 
 namespace {
 
@@ -21,6 +23,8 @@ constexpr uint8_t kSecondsOscillatorStop = 0x80;
 RtcStatus g_status = {};
 RtcHardwareConfig g_hardware = {};
 i2c_master_dev_handle_t g_device = nullptr;
+SemaphoreHandle_t g_mutex = nullptr;
+StaticSemaphore_t g_mutex_storage = {};
 
 uint8_t to_bcd(uint8_t value)
 {
@@ -75,6 +79,82 @@ esp_err_t write_registers(uint8_t start, const uint8_t *data, size_t length)
     return i2c_master_transmit(g_device, buffer, length + 1, kI2cTimeoutMs);
 }
 
+esp_err_t read_datetime_unlocked(RtcDateTime *value)
+{
+    uint8_t registers[7] = {};
+    ESP_RETURN_ON_ERROR(read_registers(kSecondsRegister, registers, sizeof(registers)),
+                        kTag,
+                        "failed to read RTC");
+
+    RtcDateTime decoded = {};
+    decoded.oscillator_stopped = (registers[0] & kSecondsOscillatorStop) != 0;
+    uint8_t year = 0;
+    if (!from_bcd(registers[0], 0x7f, &decoded.second) ||
+        !from_bcd(registers[1], 0x7f, &decoded.minute) ||
+        !from_bcd(registers[2], 0x3f, &decoded.hour) ||
+        !from_bcd(registers[3], 0x3f, &decoded.day) ||
+        !from_bcd(registers[4], 0x07, &decoded.weekday) ||
+        !from_bcd(registers[5], 0x1f, &decoded.month) ||
+        !from_bcd(registers[6], 0xff, &year)) {
+        return ESP_ERR_INVALID_RESPONSE;
+    }
+    decoded.year = static_cast<uint16_t>(2000 + year);
+    if (!rtc_datetime_valid(decoded) || decoded.weekday > 6) {
+        return ESP_ERR_INVALID_RESPONSE;
+    }
+
+    *value = decoded;
+    return ESP_OK;
+}
+
+esp_err_t set_datetime_unlocked(const RtcDateTime &value)
+{
+    uint8_t control = 0;
+    ESP_RETURN_ON_ERROR(read_registers(kControl1Register, &control, 1),
+                        kTag,
+                        "failed to read RTC control");
+    control &= static_cast<uint8_t>(~kControl1TwelveHour);
+    if (g_hardware.capacitor_12_5_pf) {
+        control |= kControl1CapSelect;
+    } else {
+        control &= static_cast<uint8_t>(~kControl1CapSelect);
+    }
+
+    uint8_t stopped = static_cast<uint8_t>(control | kControl1Stop);
+    ESP_RETURN_ON_ERROR(write_registers(kControl1Register, &stopped, 1),
+                        kTag,
+                        "failed to stop RTC");
+
+    const uint8_t registers[7] = {
+        to_bcd(value.second),
+        to_bcd(value.minute),
+        to_bcd(value.hour),
+        to_bcd(value.day),
+        to_bcd(rtc_weekday(value.year, value.month, value.day)),
+        to_bcd(value.month),
+        to_bcd(static_cast<uint8_t>(value.year - 2000)),
+    };
+    esp_err_t err = write_registers(kSecondsRegister, registers, sizeof(registers));
+    const esp_err_t restart_err = write_registers(kControl1Register, &control, 1);
+    if (err != ESP_OK) {
+        return err;
+    }
+    ESP_RETURN_ON_ERROR(restart_err, kTag, "failed to restart RTC");
+
+    RtcDateTime verify = {};
+    ESP_RETURN_ON_ERROR(read_datetime_unlocked(&verify), kTag, "failed to verify RTC");
+    ESP_RETURN_ON_FALSE(!verify.oscillator_stopped &&
+                            verify.year == value.year &&
+                            verify.month == value.month &&
+                            verify.day == value.day &&
+                            verify.hour == value.hour &&
+                            verify.minute == value.minute,
+                        ESP_ERR_INVALID_RESPONSE,
+                        kTag,
+                        "RTC verification failed");
+    return ESP_OK;
+}
+
 }  // namespace
 
 bool rtc_datetime_valid(const RtcDateTime &value)
@@ -116,6 +196,12 @@ esp_err_t rtc_manager_start(const BoardConfig &board)
         return ESP_ERR_NOT_SUPPORTED;
     }
 
+    g_mutex = xSemaphoreCreateMutexStatic(&g_mutex_storage);
+    ESP_RETURN_ON_FALSE(g_mutex != nullptr,
+                        ESP_ERR_NO_MEM,
+                        kTag,
+                        "failed to create RTC mutex");
+
     esp_err_t err = board_i2c_add_device(g_hardware.i2c_address,
                                           board.i2c.frequency_hz,
                                           &g_device);
@@ -151,30 +237,13 @@ esp_err_t rtc_manager_read(RtcDateTime *value)
                         kTag,
                         "RTC is unavailable");
 
-    uint8_t registers[7] = {};
-    ESP_RETURN_ON_ERROR(read_registers(kSecondsRegister, registers, sizeof(registers)),
+    ESP_RETURN_ON_FALSE(xSemaphoreTake(g_mutex, pdMS_TO_TICKS(500)) == pdTRUE,
+                        ESP_ERR_TIMEOUT,
                         kTag,
-                        "failed to read RTC");
-
-    RtcDateTime decoded = {};
-    decoded.oscillator_stopped = (registers[0] & kSecondsOscillatorStop) != 0;
-    uint8_t year = 0;
-    if (!from_bcd(registers[0], 0x7f, &decoded.second) ||
-        !from_bcd(registers[1], 0x7f, &decoded.minute) ||
-        !from_bcd(registers[2], 0x3f, &decoded.hour) ||
-        !from_bcd(registers[3], 0x3f, &decoded.day) ||
-        !from_bcd(registers[4], 0x07, &decoded.weekday) ||
-        !from_bcd(registers[5], 0x1f, &decoded.month) ||
-        !from_bcd(registers[6], 0xff, &year)) {
-        return ESP_ERR_INVALID_RESPONSE;
-    }
-    decoded.year = static_cast<uint16_t>(2000 + year);
-    if (!rtc_datetime_valid(decoded) || decoded.weekday > 6) {
-        return ESP_ERR_INVALID_RESPONSE;
-    }
-
-    *value = decoded;
-    return ESP_OK;
+                        "RTC is busy");
+    const esp_err_t err = read_datetime_unlocked(value);
+    xSemaphoreGive(g_mutex);
+    return err;
 }
 
 esp_err_t rtc_manager_set(const RtcDateTime &value)
@@ -188,48 +257,11 @@ esp_err_t rtc_manager_set(const RtcDateTime &value)
                         kTag,
                         "invalid RTC date or time");
 
-    uint8_t control = 0;
-    ESP_RETURN_ON_ERROR(read_registers(kControl1Register, &control, 1),
+    ESP_RETURN_ON_FALSE(xSemaphoreTake(g_mutex, pdMS_TO_TICKS(500)) == pdTRUE,
+                        ESP_ERR_TIMEOUT,
                         kTag,
-                        "failed to read RTC control");
-    control &= static_cast<uint8_t>(~kControl1TwelveHour);
-    if (g_hardware.capacitor_12_5_pf) {
-        control |= kControl1CapSelect;
-    } else {
-        control &= static_cast<uint8_t>(~kControl1CapSelect);
-    }
-
-    uint8_t stopped = static_cast<uint8_t>(control | kControl1Stop);
-    ESP_RETURN_ON_ERROR(write_registers(kControl1Register, &stopped, 1),
-                        kTag,
-                        "failed to stop RTC");
-
-    const uint8_t registers[7] = {
-        to_bcd(value.second),
-        to_bcd(value.minute),
-        to_bcd(value.hour),
-        to_bcd(value.day),
-        to_bcd(rtc_weekday(value.year, value.month, value.day)),
-        to_bcd(value.month),
-        to_bcd(static_cast<uint8_t>(value.year - 2000)),
-    };
-    esp_err_t err = write_registers(kSecondsRegister, registers, sizeof(registers));
-    const esp_err_t restart_err = write_registers(kControl1Register, &control, 1);
-    if (err != ESP_OK) {
-        return err;
-    }
-    ESP_RETURN_ON_ERROR(restart_err, kTag, "failed to restart RTC");
-
-    RtcDateTime verify = {};
-    ESP_RETURN_ON_ERROR(rtc_manager_read(&verify), kTag, "failed to verify RTC");
-    ESP_RETURN_ON_FALSE(!verify.oscillator_stopped &&
-                            verify.year == value.year &&
-                            verify.month == value.month &&
-                            verify.day == value.day &&
-                            verify.hour == value.hour &&
-                            verify.minute == value.minute,
-                        ESP_ERR_INVALID_RESPONSE,
-                        kTag,
-                        "RTC verification failed");
-    return ESP_OK;
+                        "RTC is busy");
+    const esp_err_t err = set_datetime_unlocked(value);
+    xSemaphoreGive(g_mutex);
+    return err;
 }

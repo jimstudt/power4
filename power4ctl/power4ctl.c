@@ -307,6 +307,7 @@ static int write_all_fd(int fd, const void *data, size_t length);
    header, so allow for the worst case. */
 #define LINEBUF         131072
 #define B64_LINE_WIDTH  76      /* 57 input bytes → 76 base64 chars per line */
+#define POLICY_MAX_BYTES (16U * 1024U)
 #define TOOL_PREFIX     "p4exec "
 
 enum dot_response_kind {
@@ -456,6 +457,15 @@ static int do_stage(int fd, const char *filename, const struct timespec *deadlin
     }
     if (fseek(f, 0, SEEK_END) < 0 || (size = ftell(f)) < 0) {
         fprintf(stderr, "%s: cannot determine size: %s\n", filename, strerror(errno));
+        fclose(f);
+        return -1;
+    }
+    if ((unsigned long)size > POLICY_MAX_BYTES) {
+        fprintf(stderr,
+                "%s: policy is %ld bytes; maximum is %u bytes\n",
+                filename,
+                size,
+                POLICY_MAX_BYTES);
         fclose(f);
         return -1;
     }

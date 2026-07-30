@@ -253,6 +253,8 @@ policy program.
 The file is sent base64-encoded in 76-character lines preceded by a
 .B "policy upload \fIsha1hex\fP"
 command.
+A policy program may contain at most 16 KiB.
+The file buffer is allocated on the host heap.
 A blank line signals end of upload.
 On success, the device's confirmation message is printed to standard output.
 .TP

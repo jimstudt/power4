@@ -23,6 +23,7 @@
 #include "policy_task.hpp"
 #include "relay_manager.hpp"
 #include "rtc_manager.hpp"
+#include "time_manager.hpp"
 #include "network_console.hpp"
 #include "esp_app_desc.h"
 #include "esp_chip_info.h"
@@ -74,13 +75,14 @@ constexpr size_t kBatteryStateJsonBytesPerBattery = 256;
 constexpr size_t kBankStateJsonBaseBytes = 96;
 constexpr size_t kBankStateJsonBytesPerBank = 640;
 constexpr size_t kLogsJsonBaseBytes = 96;
-constexpr size_t kPolicyUploadMaxDecodedBytes = 8192;
+constexpr size_t kPolicyUploadMaxDecodedBytes = kPolicyProgramMaxBytes;
 constexpr size_t kPolicyUploadMaxEncodedBytes = ((kPolicyUploadMaxDecodedBytes + 2) / 3) * 4;
 // The USB serial JTAG driver's ISR silently drops received bytes when its RX
 // ring buffer is full; there is no flow control back to the host. Tools like
 // power4ctl send a whole policy upload in one burst, so the ring must hold
 // the largest burst: the encoded policy plus line terminators and command.
-constexpr size_t kConsoleRxBufferBytes = 16384;
+// usb_serial_jtag_driver_install() creates this ring on the heap.
+constexpr size_t kConsoleRxBufferBytes = kPolicyUploadMaxEncodedBytes + 1024;
 constexpr size_t kPolicyUploadLineBytes = 160;
 constexpr size_t kConsoleLineBytes = 256;
 constexpr uint32_t kConsoleTaskStackBytes = 8192;
@@ -476,6 +478,8 @@ void print_show_usage(void)
     printf("  show relays\n");
     printf("  show system\n");
     printf("  show time\n");
+    printf("  show timezone\n");
+    printf("  show timezones\n");
 }
 
 int show_batteries_command(void)
@@ -701,37 +705,80 @@ const char *weekday_name(uint8_t weekday)
 
 int show_time_command(void)
 {
-    RtcStatus status = {};
-    esp_err_t err = rtc_manager_get_status(&status);
+    TimeSnapshot snapshot = {};
+    const esp_err_t err = time_manager_get_time(&snapshot);
     if (err != ESP_OK) {
         printf("show time failed: %s\n", esp_err_to_name(err));
         return 1;
     }
-    if (!status.present) {
-        printf("time: RTC not present\n");
-        return 0;
-    }
-    if (!status.initialized) {
-        printf("time: RTC unavailable (%s)\n", esp_err_to_name(status.initialization_result));
+    if (!snapshot.valid) {
+        printf("time: not set\n");
         return 1;
     }
 
-    RtcDateTime value = {};
-    err = rtc_manager_read(&value);
+    printf("time: %04d-%02d-%02d %02d:%02d:%02d UTC %s\n",
+           snapshot.utc.tm_year + 1900,
+           snapshot.utc.tm_mon + 1,
+           snapshot.utc.tm_mday,
+           snapshot.utc.tm_hour,
+           snapshot.utc.tm_min,
+           snapshot.utc.tm_sec,
+           weekday_name(static_cast<uint8_t>(snapshot.utc.tm_wday)));
+    const int offset = snapshot.utc_offset_minutes;
+    const int offset_magnitude = offset < 0 ? -offset : offset;
+    printf("local: %04d-%02d-%02d %02d:%02d:%02d %s %s "
+           "timezone=%s offset=%c%02d:%02d source=%s\n",
+           snapshot.local.tm_year + 1900,
+           snapshot.local.tm_mon + 1,
+           snapshot.local.tm_mday,
+           snapshot.local.tm_hour,
+           snapshot.local.tm_min,
+           snapshot.local.tm_sec,
+           snapshot.abbreviation,
+           weekday_name(static_cast<uint8_t>(snapshot.local.tm_wday)),
+           snapshot.timezone_name,
+           offset < 0 ? '-' : '+',
+           offset_magnitude / 60,
+           offset_magnitude % 60,
+           time_source_name(snapshot.source));
+    return 0;
+}
+
+int show_timezone_command(void)
+{
+    TimeManagerStatus status = {};
+    const esp_err_t err = time_manager_get_status(&status);
     if (err != ESP_OK) {
-        printf("show time failed: %s\n", esp_err_to_name(err));
+        printf("show timezone failed: %s\n", esp_err_to_name(err));
         return 1;
     }
-    printf("time: %04u-%02u-%02u %02u:%02u:%02u local %s status=%s\n",
-           value.year,
-           value.month,
-           value.day,
-           value.hour,
-           value.minute,
-           value.second,
-           weekday_name(value.weekday),
-           value.oscillator_stopped ? "oscillator-stopped" : "valid");
-    return value.oscillator_stopped ? 1 : 0;
+    printf("timezone: %s posix=%s current=%s\n",
+           status.timezone_name,
+           status.posix_timezone,
+           status.current_abbreviation[0] != '\0'
+               ? status.current_abbreviation
+               : "clock-not-set");
+    printf("sntp: %s server=%s\n",
+           status.sntp_started ? "started" : "stopped",
+           time_manager_sntp_server());
+    return 0;
+}
+
+int show_timezones_command(void)
+{
+    printf("%-20s %-5s %s\n", "name", "short", "POSIX rule");
+    for (size_t index = 0; index < time_manager_timezone_count(); ++index) {
+        const TimezoneInfo *timezone = time_manager_timezone_at(index);
+        if (timezone == nullptr) {
+            printf("show timezones failed: invalid table entry\n");
+            return 1;
+        }
+        printf("%-20s %-5s %s\n",
+               timezone->human_name,
+               timezone->short_name,
+               timezone->posix_rule);
+    }
+    return 0;
 }
 
 int show_inputs_command(void)
@@ -903,6 +950,22 @@ int show_command(int argc, char **argv)
             return 1;
         }
         return show_time_command();
+    }
+
+    if (strcmp(argv[1], "timezone") == 0) {
+        if (argc != 2) {
+            print_show_usage();
+            return 1;
+        }
+        return show_timezone_command();
+    }
+
+    if (strcmp(argv[1], "timezones") == 0) {
+        if (argc != 2) {
+            print_show_usage();
+            return 1;
+        }
+        return show_timezones_command();
     }
 
     print_show_usage();
@@ -1131,7 +1194,8 @@ void print_set_usage(void)
     printf("  set relay <relay> force-on\n");
     printf("  set relay <relay> force-off\n");
     printf("  set relay <relay> clear-force\n");
-    printf("  set time YYYY-MM-DD HH:MM:SS\n");
+    printf("  set time YYYY-MM-DD HH:MM:SS  (UTC)\n");
+    printf("  set timezone <name>  (see 'show timezones')\n");
 }
 
 bool parse_rtc_datetime(const char *date_text, const char *time_text, RtcDateTime *value)
@@ -1340,12 +1404,25 @@ int set_command(int argc, char **argv)
             print_set_usage();
             return 1;
         }
-        const esp_err_t err = rtc_manager_set(value);
+        const esp_err_t err = time_manager_set_utc(value);
         if (err != ESP_OK) {
             printf("set time failed: %s\n", esp_err_to_name(err));
             return 1;
         }
         return show_time_command();
+    }
+
+    if (strcmp(argv[1], "timezone") == 0) {
+        if (argc != 3) {
+            print_set_usage();
+            return 1;
+        }
+        const esp_err_t err = time_manager_set_timezone(argv[2]);
+        if (err != ESP_OK) {
+            printf("set timezone failed: %s\n", esp_err_to_name(err));
+            return 1;
+        }
+        return show_timezone_command();
     }
 
     print_set_usage();
@@ -2542,7 +2619,9 @@ int power4_help_command(int argc, char **argv)
     printf("  show policy parameters      list persistent policy parameters\n");
     printf("  show relays                 list relay state\n");
     printf("  show system                 show firmware, uptime, heap, NVS, and tasks\n");
-    printf("  show time                   read the board RTC as local wall time\n");
+    printf("  show time                   show UTC and timezone-adjusted system time\n");
+    printf("  show timezone               show POSIX timezone and SNTP state\n");
+    printf("  show timezones              list supported timezone names and rules\n");
     printf("\n");
     printf("report:\n");
     printf("  report banks                print framed JSON battery-bank state\n");
@@ -2563,7 +2642,8 @@ int power4_help_command(int argc, char **argv)
     printf("  set relay <n> force-on      force relay on administratively\n");
     printf("  set relay <n> force-off     force relay off, overriding any timer\n");
     printf("  set relay <n> clear-force   clear administrative force\n");
-    printf("  set time <date> <time>      set local RTC time (YYYY-MM-DD HH:MM:SS)\n");
+    printf("  set time <date> <time>      set RTC and system UTC time\n");
+    printf("  set timezone <name>         select a name from 'show timezones'\n");
     printf("\n");
     printf("define/remove:\n");
     printf("  define bank <name> <battery> [battery...]\n");

@@ -5,6 +5,11 @@
 #include "esp_err.h"
 #include "nvs_flash.h"
 
+// Policy source is always read into heap storage. Do not use this bound for a
+// task-stack array; a full program plus its NUL terminator is intentionally
+// much larger than the console or policy task's ordinary local variables.
+constexpr size_t kPolicyProgramMaxBytes = 16U * 1024U;
+
 enum class PolicySlot {
     Active,
     Staged,
