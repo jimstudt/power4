@@ -618,8 +618,9 @@ single authenticated session and command serialization.
 `examples/house.lua` is the house load-shedding policy. It coordinates the
 Ethernet, admin-computer, internet, powered-Ethernet, and porch-camera relays
 from externally maintained power, daylight, schedule, force, and deep-sleep
-flags plus two physical mode inputs. Its precedence and overlap behavior are covered by
-`examples/house_test.lua`:
+flags plus two physical mode inputs. Its precedence and overlap behavior are
+covered by `examples/house_test.lua`. DI1 is the occupied switch and powers
+the five named loads; DI2 requests all eight relay channels:
 
 ```sh
 lua examples/house_test.lua examples/house.lua

@@ -55,7 +55,7 @@ scenario("no flags keeps only admin computer",
     {},
     "on(2,300)")
 
-scenario("ample power runs everything",
+scenario("ample power runs all named loads",
     { flags = { amplePower = true } },
     "on(1,300) on(2,300) on(3,300) on(4,300) on(5,300)")
 
@@ -113,29 +113,29 @@ scenario("deep sleep overrides ample power and forces",
     },
     "off(1) off(2) off(3) off(4) off(5)")
 
-scenario("DI1 powers everything",
+scenario("DI1 occupied powers the five named relays",
     { inputs = { [1] = true } },
     "on(1,300) on(2,300) on(3,300) on(4,300) on(5,300)")
 
-scenario("DI1 overrides deep sleep",
+scenario("DI1 occupied overrides deep sleep",
     { flags = { deepSleep = true }, inputs = { [1] = true } },
     "on(1,300) on(2,300) on(3,300) on(4,300) on(5,300)")
 
-scenario("DI2 requests inverter support loads",
+scenario("DI2 powers every relay",
     { inputs = { [2] = true } },
-    "on(1,300) on(2,300)")
+    "on(1,300) on(2,300) on(3,300) on(4,300) on(5,300) on(6,300) on(7,300) on(8,300)")
 
-scenario("DI2 overrides deep sleep",
+scenario("DI2 all-relays overrides deep sleep",
     {
         flags = { deepSleep = true },
         inputs = { [2] = true },
         relays = { false, false, true, true, true },
     },
-    "on(1,300) on(2,300) off(3) off(4) off(5)")
+    "on(1,300) on(2,300) on(3,300) on(4,300) on(5,300) on(6,300) on(7,300) on(8,300)")
 
 scenario("undesired running relays turn off",
-    { relays = { true, false, true, true, true } },
-    "off(1) on(2,300) off(3) off(4) off(5)")
+    { relays = { true, false, true, true, true, true, true, true } },
+    "off(1) on(2,300) off(3) off(4) off(5) off(6) off(7) off(8)")
 
 if failures > 0 then
     print(string.format("%d scenario(s) failed", failures))
