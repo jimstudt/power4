@@ -209,6 +209,8 @@ Report command examples:
 
 ```text
 report relays
+report inputs
+report parameters
 report batteries
 report logs
 report banks
@@ -219,6 +221,11 @@ Reports are printed as a tag, byte count, SHA-1 hash, and JSON payload:
 ```text
 P4J1 <json-bytes> <sha1-hex> <json>
 ```
+
+`report parameters` returns the currently defined policy parameters in
+alphabetical order. Each entry contains `name`, `value_type`, typed `value`,
+the original `value_text`, `lifetime_s`, and `remaining_s`. The report also
+includes the bounded snapshot capacity and a `truncated` flag.
 
 System command examples:
 
@@ -531,7 +538,9 @@ to stdout:
 ```sh
 power4ctl json batteries
 power4ctl json banks
+power4ctl json inputs
 power4ctl json logs
+power4ctl json parameters
 power4ctl json relays
 ```
 
@@ -582,8 +591,8 @@ power4ctl -a 10.10.10.163 -f ~/.config/power4/password
 ```
 
 **Daemon mode** — run indefinitely, polling the device every 60 seconds and
-writing `batteries.json`, `banks.json`, `relays.json`, and `logs.json` to
-`/run/power4/`.
+writing `batteries.json`, `banks.json`, `relays.json`, `inputs.json`,
+`parameters.json`, and `logs.json` to `/run/power4/`.
 Files are written atomically via a `.tmp.` rename so readers never see partial
 content. If the port is held by another process the cycle is skipped (up to
 5 s lock-wait) and the previous files are left untouched. Terminated by

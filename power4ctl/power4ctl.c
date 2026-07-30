@@ -7,7 +7,7 @@
  *                  -D [-i interval] [-l lock-seconds] [-o outdir]
  *
  * Commands:
- *   json batteries / banks / logs / relays
+ *   json batteries / banks / inputs / logs / parameters / relays
  *   stage <filename>
  *   <anything else>   sent verbatim; output echoed to stdout
  *
@@ -18,7 +18,7 @@
  *
  * Daemon mode (-D):
  *   Loops forever, opening the selected transport each cycle, collecting JSON
- *   reports (batteries, banks, relays, logs), writing them atomically to
+ *   reports (batteries, banks, relays, inputs, parameters, logs), writing them atomically to
  *   the output directory, then closing the port and sleeping until the
  *   next interval.
  *
@@ -892,7 +892,9 @@ static int write_json_atomic(const char *dir, const char *name, const char *json
     return 0;
 }
 
-static const char * const REPORTS[] = {"batteries", "banks", "relays", "logs"};
+static const char * const REPORTS[] = {
+    "batteries", "banks", "relays", "inputs", "parameters", "logs"
+};
 #define NREPORTS ((int)(sizeof(REPORTS) / sizeof(REPORTS[0])))
 
 /*
@@ -1092,7 +1094,9 @@ static void usage(void)
             "commands:\n"
             "  json batteries\n"
             "  json banks\n"
+            "  json inputs\n"
             "  json logs\n"
+            "  json parameters\n"
             "  json relays\n"
             "  stage <filename>\n"
             "  <anything else>   sent verbatim; output echoed to stdout\n"

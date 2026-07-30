@@ -65,6 +65,10 @@ constexpr const char *kTag = "power4_console";
 constexpr const char *kPrompt = "power4> ";
 constexpr size_t kRelayStateJsonBaseBytes = 96;
 constexpr size_t kRelayStateJsonBytesPerRelay = 224;
+constexpr size_t kInputStateJsonBaseBytes = 96;
+constexpr size_t kInputStateJsonBytesPerInput = 192;
+constexpr size_t kParameterStateJsonBaseBytes = 128;
+constexpr size_t kParameterStateJsonBytesPerParameter = 256;
 constexpr size_t kBatteryStateJsonBaseBytes = 96;
 constexpr size_t kBatteryStateJsonBytesPerBattery = 256;
 constexpr size_t kBankStateJsonBaseBytes = 96;
@@ -398,6 +402,18 @@ int print_buffered_logs(void)
     return 0;
 }
 
+void config_flag_sort_order(const ConfigFlagList &flags, size_t *order)
+{
+    for (size_t i = 0; i < flags.count; ++i) {
+        size_t j = i;
+        while (j > 0 && strcmp(flags.names[i], flags.names[order[j - 1]]) < 0) {
+            order[j] = order[j - 1];
+            --j;
+        }
+        order[j] = i;
+    }
+}
+
 int print_config_flags(void)
 {
     ConfigFlagList *flags = static_cast<ConfigFlagList *>(malloc(sizeof(ConfigFlagList)));
@@ -415,14 +431,7 @@ int print_config_flags(void)
 
     // NVS iteration order is arbitrary; present the names alphabetically.
     size_t order[kConfigFlagListMax];
-    for (size_t i = 0; i < flags->count; ++i) {
-        size_t j = i;
-        while (j > 0 && strcmp(flags->names[i], flags->names[order[j - 1]]) < 0) {
-            order[j] = order[j - 1];
-            --j;
-        }
-        order[j] = i;
-    }
+    config_flag_sort_order(*flags, order);
 
     if (flags->count == 0) {
         printf("parameters: none\n");
@@ -1642,6 +1651,171 @@ int report_relays_command(void)
     return 0;
 }
 
+int report_inputs_command(void)
+{
+    InputManagerStatus manager = {};
+    esp_err_t err = input_manager_get_status(&manager);
+    if (err != ESP_OK) {
+        printf("report inputs failed: %s\n", esp_err_to_name(err));
+        return 1;
+    }
+    if (manager.present && !manager.initialized) {
+        printf("report inputs failed: inputs unavailable: %s\n",
+               esp_err_to_name(manager.initialization_result));
+        return 1;
+    }
+
+    const uint8_t input_count = manager.initialized ? manager.count : 0;
+    const size_t capacity =
+        kInputStateJsonBaseBytes +
+        (static_cast<size_t>(input_count) * kInputStateJsonBytesPerInput);
+    char *json = static_cast<char *>(malloc(capacity));
+    if (json == nullptr) {
+        printf("report inputs failed: out of memory\n");
+        return 1;
+    }
+
+    size_t used = 0;
+    bool ok = append_json(json,
+                          capacity,
+                          &used,
+                          "{\"type\":\"input_state\",\"input_count\":%u,\"inputs\":[",
+                          input_count);
+
+    for (uint8_t input = 1; ok && input <= input_count; ++input) {
+        InputStatus status = {};
+        err = input_manager_query(input, &status);
+        if (err != ESP_OK) {
+            printf("report inputs failed: input %u query: %s\n",
+                   input,
+                   esp_err_to_name(err));
+            free(json);
+            return 1;
+        }
+
+        ok = append_json(json,
+                         capacity,
+                         &used,
+                         "%s{\"id\":%u,\"backend\":\"%s\",\"hardware_channel\":%d,"
+                         "\"gpio\":%d,\"active_level\":%u,\"level\":%d,\"input_on\":%s}",
+                         input == 1 ? "" : ",",
+                         status.input,
+                         digital_input_backend_name(status.backend),
+                         status.gpio_pin,
+                         status.gpio_pin,
+                         status.active_level,
+                         status.level,
+                         status.on ? "true" : "false");
+    }
+
+    ok = ok && append_json(json, capacity, &used, "]}");
+    if (!ok) {
+        printf("report inputs failed: JSON buffer too small\n");
+        free(json);
+        return 1;
+    }
+
+    err = json_output_print(json);
+    free(json);
+    if (err != ESP_OK) {
+        printf("report inputs failed: %s\n", esp_err_to_name(err));
+        return 1;
+    }
+
+    return 0;
+}
+
+int report_parameters_command(void)
+{
+    ConfigFlagList *parameters =
+        static_cast<ConfigFlagList *>(malloc(sizeof(ConfigFlagList)));
+    if (parameters == nullptr) {
+        printf("report parameters failed: out of memory\n");
+        return 1;
+    }
+
+    esp_err_t err = config_flags_list(parameters);
+    if (err != ESP_OK) {
+        printf("report parameters failed: %s\n", esp_err_to_name(err));
+        free(parameters);
+        return 1;
+    }
+
+    const size_t capacity =
+        kParameterStateJsonBaseBytes +
+        (kConfigFlagListMax * kParameterStateJsonBytesPerParameter);
+    char *json = static_cast<char *>(malloc(capacity));
+    if (json == nullptr) {
+        printf("report parameters failed: out of memory\n");
+        free(parameters);
+        return 1;
+    }
+
+    size_t order[kConfigFlagListMax] = {};
+    config_flag_sort_order(*parameters, order);
+
+    size_t used = 0;
+    bool ok = append_json(json,
+                          capacity,
+                          &used,
+                          "{\"type\":\"policy_parameters\",\"capacity\":%u,\"count\":%u,"
+                          "\"truncated\":%s,\"parameters\":[",
+                          static_cast<unsigned>(kConfigFlagListMax),
+                          static_cast<unsigned>(parameters->count),
+                          parameters->truncated ? "true" : "false");
+
+    for (size_t i = 0; ok && i < parameters->count; ++i) {
+        const size_t k = order[i];
+        ok = append_json(json, capacity, &used, "%s{\"name\":", i == 0 ? "" : ",");
+        ok = ok && append_json_string(json, capacity, &used, parameters->names[k]);
+        ok = ok && append_json(json,
+                               capacity,
+                               &used,
+                               ",\"value_type\":\"%s\",\"value\":",
+                               config_flag_type_name(parameters->types[k]));
+
+        if (ok && parameters->types[k] == ConfigFlagType::Boolean) {
+            ok = append_json(json, capacity, &used, "%s", parameters->values[k]);
+        } else if (ok && parameters->types[k] == ConfigFlagType::Number) {
+            ConfigNumber number = {};
+            if (!config_number_parse(parameters->values[k], &number)) {
+                ok = false;
+            } else if (number.is_integer) {
+                ok = append_json(json, capacity, &used, "%lld", number.integer);
+            } else {
+                ok = append_json(json, capacity, &used, "%.17g", number.value);
+            }
+        } else if (ok) {
+            ok = append_json(json, capacity, &used, "null");
+        }
+
+        ok = ok && append_json(json, capacity, &used, ",\"value_text\":");
+        ok = ok && append_json_string(json, capacity, &used, parameters->values[k]);
+        ok = ok && append_json(json,
+                               capacity,
+                               &used,
+                               ",\"lifetime_s\":%" PRIu32 ",\"remaining_s\":%" PRIu32 "}",
+                               parameters->lifetime_s[k],
+                               parameters->remaining_s[k]);
+    }
+
+    ok = ok && append_json(json, capacity, &used, "]}");
+    free(parameters);
+    if (!ok) {
+        printf("report parameters failed: JSON buffer too small or invalid parameter value\n");
+        free(json);
+        return 1;
+    }
+
+    err = json_output_print(json);
+    free(json);
+    if (err != ESP_OK) {
+        printf("report parameters failed: %s\n", esp_err_to_name(err));
+        return 1;
+    }
+    return 0;
+}
+
 int report_batteries_command(void)
 {
     BatteryRecord *records =
@@ -1870,7 +2044,9 @@ void print_report_usage(void)
     printf("usage:\n");
     printf("  report banks\n");
     printf("  report batteries\n");
+    printf("  report inputs\n");
     printf("  report logs\n");
+    printf("  report parameters\n");
     printf("  report relays\n");
 }
 
@@ -1887,6 +2063,22 @@ int report_command(int argc, char **argv)
             return 1;
         }
         return report_relays_command();
+    }
+
+    if (strcmp(argv[1], "inputs") == 0) {
+        if (argc != 2) {
+            print_report_usage();
+            return 1;
+        }
+        return report_inputs_command();
+    }
+
+    if (strcmp(argv[1], "parameters") == 0) {
+        if (argc != 2) {
+            print_report_usage();
+            return 1;
+        }
+        return report_parameters_command();
     }
 
     if (strcmp(argv[1], "banks") == 0) {
@@ -2355,7 +2547,9 @@ int power4_help_command(int argc, char **argv)
     printf("report:\n");
     printf("  report banks                print framed JSON battery-bank state\n");
     printf("  report batteries            print framed JSON battery observations\n");
+    printf("  report inputs               print framed JSON digital input state\n");
     printf("  report logs                 print framed JSON recent system log text\n");
+    printf("  report parameters           print framed JSON policy parameters\n");
     printf("  report relays               print framed JSON relay state\n");
     printf("\n");
     printf("set:\n");

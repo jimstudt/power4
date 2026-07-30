@@ -128,6 +128,8 @@ the JSON reports
 .RB ( batteries ,
 .BR banks ,
 .BR relays ,
+.BR inputs ,
+.BR parameters ,
 .BR logs ),
 writing them atomically to the output directory, then closing the port
 and sleeping until the next interval.
@@ -185,7 +187,7 @@ or
 .TP
 .B \-D
 Daemon mode.
-Run forever, collecting all four JSON reports on a periodic loop.
+Run forever, collecting all six JSON reports on a periodic loop.
 Takes no command arguments.
 Terminated cleanly by
 .B SIGTERM
@@ -207,6 +209,8 @@ Directory where daemon mode writes
 .IR batteries.json ,
 .IR banks.json ,
 .IR relays.json ,
+.IR inputs.json ,
+.IR parameters.json ,
 and
 .I logs.json
 (created if it does not exist).
@@ -222,12 +226,20 @@ JSON object to standard output.
 Request the current battery bank state from the device and print the
 JSON object to standard output.
 .TP
+.B json inputs
+Request the current digital input state from the device and print the
+JSON object to standard output.
+.TP
 .B json logs
 Request a snapshot of the device's recent system log text (a rolling 16 KB
 buffer) and print the JSON object to standard output.
 The log text is in the object's
 .B text
 field.
+.TP
+.B json parameters
+Request the currently defined policy parameters and their lifetime state
+from the device and print the JSON object to standard output.
 .TP
 .B json relays
 Request the current relay state from the device and print the JSON object
@@ -252,7 +264,7 @@ prompt returns.
 This provides full access to the device's console without a separate
 terminal emulator.
 .SH DAEMON OUTPUT FILES
-In daemon mode, four files are maintained under the output directory
+In daemon mode, six files are maintained under the output directory
 (default
 .IR /run/power4 ):
 .TP
@@ -264,6 +276,12 @@ Current battery bank state.
 .TP
 .I relays.json
 Current relay state.
+.TP
+.I inputs.json
+Current digital input state.
+.TP
+.I parameters.json
+Currently defined policy parameters, including value types and lifetimes.
 .TP
 .I logs.json
 Snapshot of the device's recent system log text (rolling 16 KB buffer).

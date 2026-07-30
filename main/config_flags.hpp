@@ -31,6 +31,7 @@ struct ConfigFlagList {
     size_t count = 0;
     bool truncated = false;
     char names[kConfigFlagListMax][kConfigFlagNameMaxBytes] = {};
+    ConfigFlagType types[kConfigFlagListMax] = {};
     // Value rendered as text: numeric text for numbers, "true"/"false"
     // for booleans. Empty only if the value could not be read.
     char values[kConfigFlagListMax][kConfigNumberTextMaxBytes] = {};
@@ -61,5 +62,6 @@ esp_err_t config_flags_get_bool(const char *name, bool *value, bool *found);
 esp_err_t config_flags_get_number(const char *name, char *text, size_t text_bytes, bool *found);
 esp_err_t config_flags_type(const char *name, ConfigFlagType *type);
 esp_err_t config_flags_list(ConfigFlagList *list);
+const char *config_flag_type_name(ConfigFlagType type);
 // Remove flags whose lifetime has elapsed. Called before each policy cycle.
 esp_err_t config_flags_expire(void);

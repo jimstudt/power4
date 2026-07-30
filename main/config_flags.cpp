@@ -561,6 +561,14 @@ esp_err_t config_flags_list(ConfigFlagList *list)
             size_t length = kConfigNumberTextMaxBytes;
             if (nvs_get_str(handle, info.key, list->values[list->count], &length) != ESP_OK) {
                 list->values[list->count][0] = '\0';
+            } else {
+                bool boolean_value = false;
+                ConfigNumber number = {};
+                if (boolean_text_value(list->values[list->count], &boolean_value)) {
+                    list->types[list->count] = ConfigFlagType::Boolean;
+                } else if (config_number_parse(list->values[list->count], &number)) {
+                    list->types[list->count] = ConfigFlagType::Number;
+                }
             }
 
             uint32_t lifetime_s = 0;
@@ -590,6 +598,19 @@ esp_err_t config_flags_list(ConfigFlagList *list)
 
     nvs_close(handle);
     return ESP_OK;
+}
+
+const char *config_flag_type_name(ConfigFlagType type)
+{
+    switch (type) {
+    case ConfigFlagType::Boolean:
+        return "boolean";
+    case ConfigFlagType::Number:
+        return "number";
+    case ConfigFlagType::NotSet:
+        break;
+    }
+    return "unknown";
 }
 
 esp_err_t config_flags_expire(void)
@@ -663,4 +684,3 @@ esp_err_t config_flags_expire(void)
 
     return ESP_OK;
 }
-
