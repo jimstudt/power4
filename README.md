@@ -604,7 +604,17 @@ daemon mode the lock attempt is retried every 500 ms for up to the lock-wait
 timeout before the cycle is skipped. TCP sessions rely on the firmware's
 single authenticated session and command serialization.
 
-## Example Policy
+## Example Policies
+
+`examples/house.lua` is the house load-shedding policy. It coordinates the
+Ethernet, admin-computer, internet, powered-Ethernet, and porch-camera relays
+from externally maintained power, daylight, schedule, force, and deep-sleep
+flags plus two physical mode inputs. Its precedence and overlap behavior are covered by
+`examples/house_test.lua`:
+
+```sh
+lua examples/house_test.lua examples/house.lua
+```
 
 `examples/shed.lua` is a complete site policy managing a 48v bank charged by
 a generator and a pair of paralleled 24v banks fed from the 48v bank through
