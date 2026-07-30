@@ -19,10 +19,10 @@
 --                   all of the other policy parameters
 --
 -- Physical mode inputs:
---   DI1              power everything
---   DI2              request the external inverter by powering the regular
+--   DI1              request the external inverter by powering the regular
 --                    Ethernet equipment and admin computer; the external
 --                    controller observes DI2 and starts the inverter
+--   DI2              power everything
 --
 -- The physical mode inputs are local recovery overrides and therefore take
 -- precedence over deepSleep. Whenever powered Ethernet is requested, regular
