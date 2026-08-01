@@ -1,1 +1,2 @@
-/etc/default/power4ctl
+remove-on-upgrade /etc/default/power4ctl
+/etc/default/power4d

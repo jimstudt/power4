@@ -9,6 +9,7 @@
 --   1  service raspberry pi (manual control only)
 --   2  48v -> 24v DC/DC converter, moves energy into the 24v banks
 --   3  generator run control, charges the 48v bank
+--   4  PoE switch for the cameras
 --
 -- Policy parameters (define policy <name>=<value> [<seconds>s]).
 -- Parameter names are NVS keys, so they are limited to 15 characters.
@@ -18,6 +19,7 @@
 --   force_48v_gen   hold the generator on (overrides allow-generator)
 --   allow-generator defaults true; set false to suppress automatic
 --                   generator runs
+--   enableCameras   power the camera PoE switch; defaults false
 -- Numbers (defaults shown; state of charge percentages):
 --   dcdc_start      50  start moving energy into the 24v banks below this
 --   dcdc_stop       70  stop moving energy above this
@@ -36,6 +38,7 @@
 local PI_RELAY = 1
 local DCDC_RELAY = 2
 local GENERATOR_RELAY = 3
+local POE_RELAY = 4
 
 local HOLD_SECONDS = 300      -- 5 minute deadman for automatic relays
 local PI_HOLD_SECONDS = 3600  -- 60 minute deadman for the raspberry pi
@@ -63,6 +66,16 @@ end
 -- relay_off for the pi.
 if config_is_set("force_pi") then
     relay_on(PI_RELAY, PI_HOLD_SECONDS)
+end
+
+-- Camera PoE switch. Unlike the manual raspberry pi control, disabling the
+-- cameras opens the relay immediately rather than waiting for its hold to
+-- expire.
+local poe_on = relay_state(POE_RELAY)
+if config_bool("enableCameras", false) then
+    relay_on(POE_RELAY, HOLD_SECONDS)
+elseif poe_on then
+    relay_off(POE_RELAY)
 end
 
 -- 48v -> 24v DC/DC converter. want is true, false, or nil for no decision.

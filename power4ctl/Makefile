@@ -4,6 +4,8 @@ CC      ?= cc
 CFLAGS  ?= -Wall -Wextra -O2
 PROGRAM := power4ctl
 LIBS    := -ledit
+SYSTEM_SUPPORT := ../power4d/Sources/Power4DSystem
+SYSTEM_HEADERS := $(SYSTEM_SUPPORT)/include
 
 include ../mk/host-target.mk
 
@@ -20,9 +22,6 @@ BUILD_CONFIG := Makefile ../mk/host-target.mk
 
 BINDIR      ?= /usr/local/bin
 MANDIR      ?= /usr/local/share/man/man1
-SYSTEMDDIR  ?= /usr/lib/systemd/system
-DEFAULTSDIR ?= /etc/default
-
 DEB_BINDIR := /usr/bin
 DEB_MANDIR := /usr/share/man/man1
 
@@ -46,20 +45,20 @@ endif
 $(TARGET): $(OBJS)
 	$(HOST_CC) $(CFLAGS) $(HOST_LDFLAGS) -o $@ $(OBJS) $(LIBS)
 
-$(OUTPUT_DIR)/power4ctl.o: power4ctl.c sha1.h sha256.h $(BUILD_CONFIG) | $(OUTPUT_DIR)
-	$(HOST_CC) $(CFLAGS) $(HOST_CFLAGS) -c -o $@ power4ctl.c
+$(OUTPUT_DIR)/power4ctl.o: power4ctl.c $(SYSTEM_HEADERS)/sha1.h $(SYSTEM_HEADERS)/sha256.h $(BUILD_CONFIG) | $(OUTPUT_DIR)
+	$(HOST_CC) $(CFLAGS) $(HOST_CFLAGS) -I$(SYSTEM_HEADERS) -c -o $@ power4ctl.c
 
-$(OUTPUT_DIR)/sha1.o: sha1.c sha1.h $(BUILD_CONFIG) | $(OUTPUT_DIR)
-	$(HOST_CC) $(CFLAGS) $(HOST_CFLAGS) -c -o $@ sha1.c
+$(OUTPUT_DIR)/sha1.o: $(SYSTEM_SUPPORT)/sha1.c $(SYSTEM_HEADERS)/sha1.h $(BUILD_CONFIG) | $(OUTPUT_DIR)
+	$(HOST_CC) $(CFLAGS) $(HOST_CFLAGS) -I$(SYSTEM_HEADERS) -c -o $@ $(SYSTEM_SUPPORT)/sha1.c
 
-$(OUTPUT_DIR)/sha256.o: sha256.c sha256.h $(BUILD_CONFIG) | $(OUTPUT_DIR)
-	$(HOST_CC) $(CFLAGS) $(HOST_CFLAGS) -c -o $@ sha256.c
+$(OUTPUT_DIR)/sha256.o: $(SYSTEM_SUPPORT)/sha256.c $(SYSTEM_HEADERS)/sha256.h $(BUILD_CONFIG) | $(OUTPUT_DIR)
+	$(HOST_CC) $(CFLAGS) $(HOST_CFLAGS) -I$(SYSTEM_HEADERS) -c -o $@ $(SYSTEM_SUPPORT)/sha256.c
 
 $(OUTPUT_DIR):
 	mkdir -p $@
 
-$(TEST_SHA256): test_sha256.c sha256.c sha256.h $(BUILD_CONFIG) | $(OUTPUT_DIR)
-	$(HOST_CC) $(CFLAGS) $(HOST_CFLAGS) $(HOST_LDFLAGS) -o $@ test_sha256.c sha256.c
+$(TEST_SHA256): test_sha256.c $(SYSTEM_SUPPORT)/sha256.c $(SYSTEM_HEADERS)/sha256.h $(BUILD_CONFIG) | $(OUTPUT_DIR)
+	$(HOST_CC) $(CFLAGS) $(HOST_CFLAGS) $(HOST_LDFLAGS) -I$(SYSTEM_HEADERS) -o $@ test_sha256.c $(SYSTEM_SUPPORT)/sha256.c
 
 test: all $(TEST_SHA256)
 ifeq ($(HOST_TARGET),native)
@@ -86,13 +85,9 @@ uninstall:
 install-deb: all
 	@test -n "$(DESTDIR)" || { printf 'DESTDIR is required\n' >&2; exit 1; }
 	install -d "$(DESTDIR)$(DEB_BINDIR)" \
-	           "$(DESTDIR)$(DEB_MANDIR)" \
-	           "$(DESTDIR)$(SYSTEMDDIR)" \
-	           "$(DESTDIR)$(DEFAULTSDIR)"
+	           "$(DESTDIR)$(DEB_MANDIR)"
 	install -m 755 "$(TARGET)" "$(DESTDIR)$(DEB_BINDIR)/$(PROGRAM)"
 	gzip -c $(PROGRAM).1 > "$(DESTDIR)$(DEB_MANDIR)/$(PROGRAM).1.gz"
-	install -m 644 $(PROGRAM).service "$(DESTDIR)$(SYSTEMDDIR)/$(PROGRAM).service"
-	install -m 644 $(PROGRAM).default "$(DESTDIR)$(DEFAULTSDIR)/$(PROGRAM)"
 
 print-bin:
 	@printf '%s\n' "$(TARGET)"

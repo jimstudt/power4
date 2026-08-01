@@ -1,0 +1,23 @@
+# Configuration for power4d. This file may contain controller passwords and is
+# installed mode 0600. Configure at least one node before starting the service.
+
+INTERVAL=60
+BAUD=115200
+OUTDIR=/run/power4
+
+# Optional command flags, for example: POWER4D_OPTIONS=--verbose
+POWER4D_OPTIONS=
+
+# Whitespace-separated node specifications. Device paths and node directory
+# names must not contain whitespace.
+#
+# TCP:    tcp:<IPv4-or-hostname>:<password-environment-name>:<directory>
+# Serial: serial:<device-path>:<directory>
+#
+# Example:
+# NODES="tcp:10.10.10.3:PW1:shed serial:/dev/serial/by-id/example:house"
+NODES=
+
+# TCP passwords are read from named environment variables and never placed in
+# the power4d command line. Values must contain 16-128 printable bytes.
+# PW1="replace with the controller password"

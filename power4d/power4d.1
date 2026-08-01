@@ -1,0 +1,125 @@
+.TH POWER4D 1 "August 1, 2026" "power4d" "User Commands"
+.SH NAME
+power4d \- collect reports from multiple power4 controllers
+.SH SYNOPSIS
+.B power4d
+.RB [ \-i | \-\-interval
+.IR seconds ]
+.RB [ \-b | \-\-baud
+.IR rate ]
+.RB [ \-o | \-\-output\-directory
+.IR path ]
+.RB [ \-v | \-\-verbose ]
+.I node
+.RI [ node... ]
+.SH DESCRIPTION
+.B power4d
+periodically collects six JSON reports from each configured power4 controller:
+.IR batteries ,
+.IR banks ,
+.IR relays ,
+.IR inputs ,
+.IR parameters ,
+and
+.IR logs .
+Each node runs independently so an unavailable controller does not delay the
+other nodes.  Reports for one node are requested sequentially over one
+short-lived connection.
+.PP
+Successful reports are validated using the P4J1 byte count and SHA-1 checksum,
+then atomically installed as
+.RI output-directory / node / report .json.
+A failed report leaves its previous file unchanged.
+.SH NODE SPECIFICATIONS
+.TP
+.BI tcp: host : password-environment : directory
+Connect to the authenticated TCP console on IPv4 port 4244.  The host may be a
+numeric IPv4 address or hostname.  Hostnames are resolved once at startup and
+remain cached until the service restarts.  The password is read from the named
+environment variable and must contain 16 to 128 printable bytes.
+.TP
+.BI serial: device : directory
+Open the serial device in raw 8N1 mode.  The final colon separates the node
+directory, so the device path itself may contain colons.
+Every serial path is checked at startup and must exist, resolve to a character
+device, and be readable and writable.  A failure terminates startup with the
+offending path in the diagnostic.
+.PP
+The directory is both the node name used in logs and one path component below
+the output root.  It may contain ASCII letters, digits, dot, underscore, and
+hyphen, but may not be dot, dot-dot, or contain a slash or whitespace.  Node
+directories must be unique.
+.SH OPTIONS
+.TP
+.BR \-i , " " \-\-interval " " \fIseconds\fP
+Start-to-start collection interval.  The default is 60 seconds and the minimum
+is 2 seconds.  A TCP node's entire connect, authentication, and collection
+cycle is limited to half of this interval.
+.TP
+.BR \-b , " " \-\-baud " " \fIrate\fP
+Baud rate applied to every serial node.  The default is 115200.  USB CDC ACM
+devices may ignore this advisory setting.
+.TP
+.BR \-o , " " \-\-output\-directory " " \fIpath\fP
+Root output directory.  The default is
+.IR /run/power4 .
+.TP
+.BR \-v , " " \-\-verbose
+Log escaped bytes sent and received.  Password values are never logged.
+.TP
+.BR \-h , " " \-\-help
+Show command help.
+.SH SERIAL LOCKING
+Serial nodes acquire
+.BR flock (2)
+with
+.B LOCK_EX|LOCK_NB
+and then apply
+.B TIOCEXCL .
+If either exclusion mechanism reports the device busy, that node is skipped
+immediately and retried at its next interval.  The lock is held across all six
+reports and released as soon as the cycle finishes or its transport fails.
+.SH SYSTEMD CONFIGURATION
+The Debian service reads
+.IR /etc/default/power4d .
+For example:
+.PP
+.RS
+.EX
+INTERVAL=60
+BAUD=115200
+OUTDIR=/run/power4
+POWER4D_OPTIONS=
+NODES="tcp:10.10.10.3:PW1:shed serial:/dev/serial/by-id/example:house"
+PW1="controller password"
+.EE
+.RE
+.PP
+The package enables but does not initially start the service.  Configure at
+least one node, then run:
+.PP
+.RS
+.EX
+systemctl start power4d.service
+.EE
+.RE
+.SH FILES
+.TP
+.I /etc/default/power4d
+Systemd environment and node configuration.  Installed mode 0600 because it
+may contain passwords.
+.TP
+.I /run/power4/
+Default runtime output root.
+.SH EXIT STATUS
+.B power4d
+exits nonzero for invalid configuration, missing passwords, an invalid or
+inaccessible serial path, hostname-resolution failure, or an unusable output
+root.  Per-node runtime failures are logged and retried without terminating the
+daemon.
+.SH SEE ALSO
+.BR power4ctl (1),
+.BR flock (2),
+.BR termios (3)
+.SH AUTHOR
+Jim Studt <jim@studt.net>

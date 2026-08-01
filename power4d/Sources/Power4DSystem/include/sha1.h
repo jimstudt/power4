@@ -1,5 +1,5 @@
-#ifndef SHA1_H
-#define SHA1_H
+#ifndef POWER4D_SHA1_H
+#define POWER4D_SHA1_H
 
 #include <stddef.h>
 #include <stdint.h>
@@ -18,4 +18,4 @@ void sha1_final(Sha1Ctx *ctx, uint8_t digest[20]);
 /* Compute lowercase hex SHA-1 of data into hex[41]. */
 void sha1_hex_of(const void *data, size_t len, char hex[41]);
 
-#endif /* SHA1_H */
+#endif

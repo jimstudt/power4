@@ -4,12 +4,15 @@ set -e
 case "$1" in
     configure)
         if [ -d /run/systemd/system ]; then
+            systemctl stop power4ctl.service || true
+            systemctl disable power4ctl.service || true
             systemctl daemon-reload || true
-            systemctl enable power4ctl.service || true
-            systemctl start power4ctl.service || true
+            systemctl enable power4d.service || true
+            # Do not start a fresh installation before NODES is configured.
+            # On upgrades, restart only if power4d was already running.
+            systemctl try-restart power4d.service || true
         fi
         ;;
 esac
 
 exit 0
-

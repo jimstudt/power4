@@ -169,6 +169,18 @@ scenario("force_pi holds pi for an hour",
     { banks = full, flags = { force_pi = true } },
     "on(1,3600)")
 
+scenario("enableCameras powers the PoE switch",
+    { banks = full, flags = { enableCameras = true } },
+    "on(4,300)")
+
+scenario("cameras disabled turns off a running PoE switch",
+    { banks = full, relays = { [4] = true } },
+    "off(4)")
+
+scenario("explicit enableCameras=false leaves PoE off",
+    { banks = full, flags = { enableCameras = false } },
+    "")
+
 scenario("force_48v_24v runs dcdc regardless of soc",
     { banks = full, flags = { force_48v_24v = true } },
     "on(2,300)")

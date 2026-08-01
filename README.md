@@ -12,10 +12,9 @@ It monitors battery state by scanning for JBD BMS advertisements over BLE and
 uses that data as input to a Lua policy program that drives the relay outputs.
 
 Also included is `power4ctl` which is a control program for a computer attached
-to the USB port of the Waveshare.  It can query, control, and configure the unit.
-It also can run as a daemon to keep JSON files of the current conditions.
-`power4d` is a Swift host program reserved for additional host-side
-responsibilities as they are developed.
+to the USB port or authenticated TCP console of the controller. It can query,
+control, and configure one unit. `power4d` is a Swift daemon that concurrently
+collects JSON reports from multiple serial or TCP controllers.
 
 ## Make Targets
 
@@ -514,9 +513,9 @@ itself. `power4ctl` removes the dot stuffing and does not use the interactive
 prompt as an end-of-response marker. Direct human console commands remain
 unchanged.
 
-`power4d` lives under `power4d/` and is built with SwiftPM. It retains an
-ArgumentParser command-line entry point but currently only prints
-`hello world`; it does not install a service yet.
+`power4d` lives under `power4d/` and is built with SwiftPM. It is the
+systemd-managed report collector. Each configured node has its own connection
+method and output directory, and nodes are polled concurrently.
 
 ### Building
 
@@ -557,16 +556,20 @@ Debian or cross-built on macOS:
 ```sh
 make deb                         # native Debian build
 make deb HOST_TARGET=pi-trixie  # ARM64 Trixie cross build
-sudo dpkg -i "dist/power4_$(cat version.txt)_arm64.deb"
+sudo apt install "./dist/power4_$(cat version.txt)_arm64.deb"
 ```
 
 Both package commands also rebuild the firmware and merged board images, so an
 ESP-IDF environment must be active even when the host programs are being
 cross-compiled.
 
-The target must have a compatible Swift runtime installed under
+The package depends on Debian Trixie's Swift 6.0.3 runtime package,
+`libswiftlang`, which installs the required libraries under
 `/usr/libexec/swift/lib/swift/linux`. Installing `power4` replaces the former
-`power4ctl` Debian package while retaining the `power4ctl` command and service.
+`power4ctl` Debian package while retaining the `power4ctl` command. Report
+collection is owned by `power4d.service`; the former `power4ctl.service` and
+`/etc/default/power4ctl` are retired without translating their single-node
+settings.
 It also installs complete board-specific firmware images under
 `/usr/share/power4/firmware`. For example:
 
@@ -578,19 +581,11 @@ esptool --chip esp32s3 --port /dev/ttyACM0 write-flash 0 \
 Use `relay-6ch.bin` instead for the six-relay board. `esptool` is an optional
 deployment tool and is not a dependency of the Debian package.
 
-### Usage
-
-The placeholder program currently has no options or subcommands:
-
-```sh
-power4d
-power4d --help
-```
+### `power4ctl` usage
 
 ```text
 power4ctl [-p port | -a address (-e name | -f file)] [-b baud] [-t seconds] [-v] command [args...]
 power4ctl [-p port | -a address (-e name | -f file)] [-b baud] [-t seconds] [-v]
-power4ctl [-p port | -a address (-e name | -f file)] [-b baud] [-t seconds] [-v] -D [-i interval] [-l lock-seconds] [-o outdir]
 
 Options:
   -p port          serial port  (default: /dev/ttyACM0)
@@ -600,10 +595,6 @@ Options:
   -b baud          baud rate    (default: 115200)
   -t seconds       timeout per operation  (default: 2)
   -v               verbose: log bytes sent/received to stderr
-  -D               daemon mode: collect JSON reports on a loop
-  -i seconds       daemon poll interval  (default: 60)
-  -l seconds       port lock wait timeout  (default: 5)
-  -o dir           daemon output directory  (default: /run/power4)
 ```
 
 ### Commands
@@ -667,28 +658,67 @@ power4ctl -p /dev/ttyACM1
 power4ctl -a 10.10.10.163 -f ~/.config/power4/password
 ```
 
-**Daemon mode** — run indefinitely, polling the device every 60 seconds and
-writing `batteries.json`, `banks.json`, `relays.json`, `inputs.json`,
-`parameters.json`, and `logs.json` to `/run/power4/`.
-Files are written atomically via a `.tmp.` rename so readers never see partial
-content. If the port is held by another process the cycle is skipped (up to
-5 s lock-wait) and the previous files are left untouched. Terminated by
-`SIGTERM` or `SIGINT`:
+### `power4d` report collection
+
+`power4d` requires at least one positional node specification. Serial device
+paths use their final colon as the separator, so paths containing colons are
+accepted:
 
 ```sh
-power4ctl -D
-power4ctl -D -i 30 -l 10 -o /var/lib/power4
-power4ctl -a 10.10.10.163 -f /etc/power4/password -D
+power4d [--interval seconds] [--baud rate] \
+  [--output-directory path] [--verbose] node [node...]
+
+PW1='controller password' power4d \
+  tcp:10.10.10.3:PW1:shed \
+  serial:/dev/serial/by-id/example:house
+```
+
+TCP nodes use authenticated console port 4244. Their password comes from the
+named environment variable, so the password value is not exposed in process
+arguments. Hostnames resolve to cached IPv4 addresses at startup. Each TCP
+node's full six-report cycle has a deadline of half the polling interval.
+
+The six files are `batteries.json`, `banks.json`, `relays.json`, `inputs.json`,
+`parameters.json`, and `logs.json`. They are atomically replaced beneath
+`<output-directory>/<node>/`; a failed or uncollected report leaves its prior
+file intact. Nodes start immediately and run concurrently without overlapping
+their own previous cycle.
+
+At startup, every configured serial path must exist, resolve to a character
+device, and be readable and writable. A configuration error terminates the
+daemon with the failing path in the diagnostic. Ports that become unavailable
+or busy after startup are still skipped and retried normally.
+
+The Debian service reads `/etc/default/power4d`, installed mode `0600`:
+
+```sh
+INTERVAL=60
+BAUD=115200
+OUTDIR=/run/power4
+POWER4D_OPTIONS=
+NODES="tcp:10.10.10.3:PW1:shed serial:/dev/serial/by-id/example:house"
+PW1="controller password"
+```
+
+The package enables the service but does not start a fresh installation until
+nodes are configured. After editing the defaults file, start it with:
+
+```sh
+sudo systemctl start power4d.service
 ```
 
 ### Locking
 
 For serial connections, `power4ctl` uses `flock(LOCK_EX|LOCK_NB)` and
-`TIOCEXCL` immediately after opening the port. In single-shot mode, if another
-process already holds the port the tool exits immediately with an error. In
-daemon mode the lock attempt is retried every 500 ms for up to the lock-wait
-timeout before the cycle is skipped. TCP sessions rely on the firmware's
-single authenticated session and command serialization.
+`TIOCEXCL` immediately after opening the port. If another process already holds
+the port the tool exits immediately with an error. `power4d` uses the same
+exclusion mechanisms, skips a busy serial node immediately, and holds the port
+only across that node's six reports. TCP sessions rely on the firmware's single
+authenticated session and command serialization.
+
+On macOS, `power4ctl` transparently maps a `/dev/tty.*` serial path to its
+matching `/dev/cu.*` callout device. This avoids the dial-in device's blocking
+carrier wait while preserving existing commands and configuration.
 
 ## Example Policies
 
@@ -710,7 +740,8 @@ lua examples/house_test.lua examples/house.lua
 `examples/shed.lua` is a complete site policy managing a 48v bank charged by
 a generator and a pair of paralleled 24v banks fed from the 48v bank through
 a DC/DC converter, with hysteresis, deadman holds, manual override flags,
-and tunable thresholds read from policy parameters.
+and tunable thresholds read from policy parameters. Relay 4 powers the camera
+PoE switch when the `enableCameras` policy boolean is true.
 `examples/shed_test.lua` runs it against scripted scenarios on a host with a
 stock Lua 5.4 interpreter:
 

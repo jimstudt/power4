@@ -1,5 +1,5 @@
-#ifndef SHA256_H
-#define SHA256_H
+#ifndef POWER4D_SHA256_H
+#define POWER4D_SHA256_H
 
 #include <stddef.h>
 #include <stdint.h>

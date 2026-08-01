@@ -2,7 +2,7 @@ Package: power4
 Version: @VERSION@
 Architecture: @ARCH@
 Maintainer: Jim Studt <jim@studt.net>
-Depends: libc6, libedit2
+Depends: libc6, libedit2, libswiftlang (>= 6.0.3), libswiftlang (<< 6.0.4~)
 Provides: power4ctl
 Conflicts: power4ctl
 Replaces: power4ctl
@@ -10,6 +10,7 @@ Section: utils
 Priority: optional
 Description: Host tools for power4 controllers
  Installs power4ctl, the serial and authenticated TCP management client, and
- power4d, a Swift host-program placeholder. The existing power4ctl systemd
- service keeps JSON state reports current for local consumers. Complete flash
- images for both supported controller boards are also included.
+ power4d, a multi-node report collector for serial and authenticated TCP
+ controllers. The power4d systemd service keeps node-specific JSON state
+ reports current for local consumers. Complete flash images for both supported
+ controller boards are also included.

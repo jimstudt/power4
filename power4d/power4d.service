@@ -1,0 +1,21 @@
+[Unit]
+Description=power4 multi-node report collector
+Documentation=man:power4d(1)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Environment="INTERVAL=60"
+Environment="BAUD=115200"
+Environment="OUTDIR=/run/power4"
+Environment="POWER4D_OPTIONS="
+Environment="NODES="
+EnvironmentFile=-/etc/default/power4d
+ExecStart=/usr/bin/power4d --interval ${INTERVAL} --baud ${BAUD} --output-directory ${OUTDIR} $POWER4D_OPTIONS $NODES
+Restart=on-failure
+RestartSec=5
+RuntimeDirectory=power4
+RuntimeDirectoryMode=0755
+
+[Install]
+WantedBy=multi-user.target
