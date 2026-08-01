@@ -14,9 +14,8 @@ uses that data as input to a Lua policy program that drives the relay outputs.
 Also included is `power4ctl` which is a control program for a computer attached
 to the USB port of the Waveshare.  It can query, control, and configure the unit.
 It also can run as a daemon to keep JSON files of the current conditions.
-`power4d` is a Swift host program that monitors UDP envelopes forwarded by
-ESP-NOW gateway nodes and will take over additional daemon responsibilities as
-they are developed.
+`power4d` is a Swift host program reserved for additional host-side
+responsibilities as they are developed.
 
 ## Make Targets
 
@@ -75,12 +74,14 @@ make package
 
 This writes `dist/power4-firmware/` and `dist/power4-firmware.tar.gz`. The
 bundle contains the bootloader, partition table, app binary, ESP-IDF flash
-arguments, and small `flash.sh` and `monitor.sh` scripts.
+arguments, complete `relay-6ch.bin` and `poe-8ro.bin` images, and small
+`flash.sh` and `monitor.sh` scripts. A complete board image is flashed at
+offset zero.
 
-ESP-NOW pulls the ESP-IDF Wi-Fi stack into the shared image, so the factory
-application partition is 1792 KiB. Upgrades from a build with the former 1 MiB
-partition must flash the supplied partition table as well as the application;
-the normal `make flash` and packaged `flash.sh` commands already do this.
+The factory application partition is 1 MiB. Installations running the former
+1792 KiB layout should flash the supplied partition table along with the
+application; the normal `make flash` and packaged `flash.sh` commands already
+do this.
 
 The Raspberry Pi does not need a full ESP-IDF install to flash or monitor a
 prebuilt bundle. A minimal setup is:
@@ -200,7 +201,6 @@ show batteries
 show banks
 show board
 show ethernet
-show espnow
 show inputs
 show password
 show policy
@@ -256,16 +256,6 @@ set ethernet static 192.168.10.20 255.255.255.0 192.168.10.1
 set ethernet static 192.168.10.20 255.255.255.0 192.168.10.1 1.1.1.1 8.8.8.8
 set ethernet phy auto
 set ethernet phy 10-full
-set espnow name house
-set espnow peer barn 02:00:00:00:00:02
-set espnow peer barn none
-set espnow channel 6
-set espnow channel off
-set espnow rate auto
-set espnow rate lr-500
-set espnow rate lr-250
-set espnow gateway 10.10.10.17 4245
-set espnow gateway none
 set password
 set password "a manually chosen password"
 set relay 1 on 30
@@ -286,64 +276,6 @@ from 32 random bytes, saves it in NVS, and prints it. Supplying an argument
 sets that 16–128 byte printable password instead. `show password` reveals the
 stored value. Both password commands and all `set ethernet` commands are
 restricted to the physical serial console.
-
-ESP-NOW is disabled by default and uses the ESP32-S3 Wi-Fi station radio; it
-does not use or replace the W5500 Ethernet interface. Configuration is stored
-in ordinary NVS and may be changed through either the serial console or an
-authenticated TCP console. A device name must be configured before enabling
-a channel. Device and peer names are 1–31 characters from letters, digits,
-underscore, and hyphen. Channels 1–14 and up to 20 unencrypted unicast peers
-are supported. Reusing a peer name replaces its MAC address, while `none`
-removes it. `show espnow` displays the Wi-Fi station MAC that another unit must
-use when adding this controller as a peer, plus configuration, runtime state,
-and bounded send/receive/drop counters.
-
-Every enabled ESP-NOW radio accepts both ordinary B/G/N frames and Espressif
-long-range frames. `set espnow rate auto` retains the ESP-NOW default outbound
-rate, while `lr-500` and `lr-250` select the 500 or 250 Kbit/s proprietary LR
-PHY for every outbound peer. The setting is persistent and applies
-immediately. The sender chooses the rate, so the two directions may use
-different LR rates; each receiver only needs firmware that enables LR support.
-LR uses the ESP32-S3's normal 2.4 GHz radio and antenna and is not LoRa.
-
-After BLE scanning and all battery probes finish, the ESP-NOW worker snapshots
-the battery, bank, relay, and input reports and sends them to every peer. The
-scanner and command processor do not wait for this work. Each transmission
-gets one MAC-layer attempt and at most 250 ms for its callback; there is no
-application acknowledgement or retry. A failure or timeout abandons that peer
-for the remainder of the cycle. Report-cycle notifications coalesce, so a
-busy radio cannot create an unbounded backlog.
-
-Power4 ESP-NOW protocol version 1 uses ESP-NOW v2 and JSON packets no larger
-than 900 bytes. The existing report JSON is divided into 480-byte pieces;
-each piece is independently base64 encoded:
-
-```json
-{"protocol":"power4-espnow","version":1,"name":"house","frame_type":"report-batteries","message_id":123456789,"fragment":1,"fragments":3,"content_length":1200,"content_encoding":"base64","content":"..."}
-```
-
-Receivers group packets by sender, frame type, and message ID, order them by
-the one-based `fragment` field, base64-decode each `content`, and concatenate
-the decoded bytes. The result is byte-for-byte the JSON printed by the
-corresponding `report` command. Frame types are `report-batteries`,
-`report-banks`, `report-relays`, and `report-inputs`. ESP-NOW v1-only peers
-with a 250-byte limit are not supported.
-
-When a numeric IPv4 gateway and UDP port are configured, every received
-ESP-NOW packet is logged with source MAC, size, RSSI, channel, rate, signal
-mode, MCS, and noise floor. A four-slot static receive pool bounds memory;
-new packets are dropped when it is full. On an Ethernet board with an IP
-address, the worker forwards the exact packet bytes in a nonblocking UDP JSON
-datagram:
-
-```json
-{"protocol":"power4-espnow-gateway","version":1,"source_mac":"aa:bb:cc:dd:ee:ff","destination_mac":"11:22:33:44:55:66","rssi_dbm":-67,"channel":6,"rate":0,"signal_mode":0,"mcs":0,"noise_floor_dbm":-96,"size":842,"payload_encoding":"base64","content":"..."}
-```
-
-Forwarding has no acknowledgement or retry. A missing Ethernet address,
-socket pressure, or send failure drops only that datagram. ESP-NOW and gateway
-traffic are neither encrypted nor authenticated and must not be treated as a
-command channel.
 
 On Ethernet boards, an authenticated TCP console listens on IPv4 port 4244.
 The server sends a random `authenticate` challenge, and the client proves it
@@ -582,12 +514,9 @@ itself. `power4ctl` removes the dot stuffing and does not use the interactive
 prompt as an end-of-response marker. Direct human console commands remain
 unchanged.
 
-`power4d` lives under `power4d/` and is built with SwiftPM. Its `monitor`
-command listens for IPv4 UDP datagrams from ESP-NOW gateway nodes, validates
-the outer JSON envelope, and prints a metadata summary followed by the decoded
-payload for each valid datagram.
-Malformed envelopes are diagnosed on standard error and ignored. It does not
-install a service yet.
+`power4d` lives under `power4d/` and is built with SwiftPM. It retains an
+ArgumentParser command-line entry point but currently only prints
+`hello world`; it does not install a service yet.
 
 ### Building
 
@@ -631,29 +560,32 @@ make deb HOST_TARGET=pi-trixie  # ARM64 Trixie cross build
 sudo dpkg -i "dist/power4_$(cat version.txt)_arm64.deb"
 ```
 
+Both package commands also rebuild the firmware and merged board images, so an
+ESP-IDF environment must be active even when the host programs are being
+cross-compiled.
+
 The target must have a compatible Swift runtime installed under
 `/usr/libexec/swift/lib/swift/linux`. Installing `power4` replaces the former
 `power4ctl` Debian package while retaining the `power4ctl` command and service.
+It also installs complete board-specific firmware images under
+`/usr/share/power4/firmware`. For example:
+
+```sh
+esptool --chip esp32s3 --port /dev/ttyACM0 write-flash 0 \
+  /usr/share/power4/firmware/poe-8ro.bin
+```
+
+Use `relay-6ch.bin` instead for the six-relay board. `esptool` is an optional
+deployment tool and is not a dependency of the Debian package.
 
 ### Usage
 
-Start the gateway monitor on all IPv4 interfaces and its default UDP port,
-3366:
+The placeholder program currently has no options or subcommands:
 
 ```sh
-power4d monitor
+power4d
+power4d --help
 ```
-
-The bind address must be a numeric IPv4 address. Both values can be overridden:
-
-```sh
-power4d monitor --address 127.0.0.1 --port 3366
-```
-
-The monitor validates only the outer `power4-espnow-gateway` version 1
-envelope for now. It checks MAC addresses, base64 encoding, and the declared
-decoded size, but does not yet parse or reassemble the nested `power4-espnow`
-payload.
 
 ```text
 power4ctl [-p port | -a address (-e name | -f file)] [-b baud] [-t seconds] [-v] command [args...]

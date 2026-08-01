@@ -16,8 +16,6 @@
 #include "checksum.hpp"
 #include "config_flags.hpp"
 #include "ethernet_manager.hpp"
-#include "espnow_manager.hpp"
-#include "espnow_protocol.hpp"
 #include "input_manager.hpp"
 #include "json_output.hpp"
 #include "log_buffer.hpp"
@@ -464,7 +462,6 @@ void print_show_usage(void)
     printf("  show board\n");
     printf("  show debug\n");
     printf("  show ethernet\n");
-    printf("  show espnow\n");
     printf("  show inputs\n");
     printf("  show logs\n");
     printf("  show password\n");
@@ -691,71 +688,6 @@ int show_ethernet_command(void)
     return 0;
 }
 
-int show_espnow_command(void)
-{
-    EspNowStatus *status = static_cast<EspNowStatus *>(calloc(1, sizeof(EspNowStatus)));
-    if (status == nullptr) {
-        printf("show espnow failed: out of memory\n");
-        return 1;
-    }
-    const esp_err_t err = espnow_manager_get_status(status);
-    if (err != ESP_OK) {
-        printf("show espnow failed: %s\n", esp_err_to_name(err));
-        free(status);
-        return 1;
-    }
-    char station_mac[18] = {};
-    espnow_protocol_format_mac(status->station_mac, station_mac);
-    printf("espnow: name=%s channel=",
-           status->settings.name[0] != '\0' ? status->settings.name : "not-configured");
-    if (status->settings.channel == 0) {
-        printf("off");
-    } else {
-        printf("%u", status->settings.channel);
-    }
-    printf(" rate=%s radio=%s station_mac=%s last_error=%s\n",
-           espnow_rate_name(status->settings.rate),
-           status->radio_enabled ? "enabled" : "disabled",
-           station_mac,
-           esp_err_to_name(status->last_error));
-
-    if (status->settings.gateway_enabled) {
-        esp_ip4_addr_t address = {};
-        address.addr = status->settings.gateway_ipv4;
-        char ip[16] = {};
-        printf("gateway: %s:%u\n",
-               format_ip(address, ip, sizeof(ip)),
-               status->settings.gateway_port);
-    } else {
-        printf("gateway: none\n");
-    }
-    printf("peers: %u/%u\n",
-           static_cast<unsigned>(status->settings.peer_count),
-           static_cast<unsigned>(kEspNowMaxPeers));
-    for (size_t i = 0; i < status->settings.peer_count; ++i) {
-        char mac[18] = {};
-        espnow_protocol_format_mac(status->settings.peers[i].mac, mac);
-        printf("  %s %s\n", status->settings.peers[i].name, mac);
-    }
-    printf("stats: cycles=%" PRIu32 " cycle_drops=%" PRIu32
-           " tx_queued=%" PRIu32 " tx_success=%" PRIu32
-           " tx_failed=%" PRIu32 " tx_timeout=%" PRIu32 "\n",
-           status->counters.report_cycles,
-           status->counters.report_cycles_dropped,
-           status->counters.tx_queued,
-           status->counters.tx_success,
-           status->counters.tx_failed,
-           status->counters.tx_timeout);
-    printf("       rx=%" PRIu32 " rx_drops=%" PRIu32
-           " gateway_forwarded=%" PRIu32 " gateway_drops=%" PRIu32 "\n",
-           status->counters.rx_received,
-           status->counters.rx_dropped,
-           status->counters.gateway_forwarded,
-           status->counters.gateway_dropped);
-    free(status);
-    return 0;
-}
-
 const char *weekday_name(uint8_t weekday)
 {
     static constexpr const char *kWeekdays[] = {
@@ -933,14 +865,6 @@ int show_command(int argc, char **argv)
             return 1;
         }
         return show_ethernet_command();
-    }
-
-    if (strcmp(argv[1], "espnow") == 0) {
-        if (argc != 2) {
-            print_show_usage();
-            return 1;
-        }
-        return show_espnow_command();
     }
 
     if (strcmp(argv[1], "password") == 0) {
@@ -1258,12 +1182,6 @@ void print_set_usage(void)
     printf("  set ethernet dhcp\n");
     printf("  set ethernet static <ip> <netmask> <gateway> [dns1] [dns2]\n");
     printf("  set ethernet phy auto|10-half|10-full|100-half|100-full\n");
-    printf("  set espnow name <name>\n");
-    printf("  set espnow peer <name> <mac|none>\n");
-    printf("  set espnow channel <1-14|off>\n");
-    printf("  set espnow rate <auto|lr-500|lr-250>\n");
-    printf("  set espnow gateway <ipv4> <port>\n");
-    printf("  set espnow gateway none\n");
     printf("  set password [password]\n");
     printf("  set relay <relay> on [seconds]\n");
     printf("  set relay <relay> force-on\n");
@@ -1407,51 +1325,6 @@ int set_command(int argc, char **argv)
             return 1;
         }
         return show_ethernet_command();
-    }
-
-    if (strcmp(argv[1], "espnow") == 0) {
-        esp_err_t err = ESP_ERR_INVALID_ARG;
-        if (argc == 4 && strcmp(argv[2], "name") == 0) {
-            err = espnow_manager_set_name(argv[3]);
-        } else if (argc == 5 && strcmp(argv[2], "peer") == 0) {
-            err = espnow_manager_set_peer(argv[3], argv[4]);
-        } else if (argc == 4 && strcmp(argv[2], "channel") == 0) {
-            if (strcmp(argv[3], "off") == 0) {
-                err = espnow_manager_set_channel(0);
-            } else {
-                uint32_t channel = 0;
-                if (!parse_u32(argv[3], &channel) || channel == 0 || channel > 14) {
-                    print_set_usage();
-                    return 1;
-                }
-                err = espnow_manager_set_channel(static_cast<uint8_t>(channel));
-            }
-        } else if (argc == 4 && strcmp(argv[2], "rate") == 0) {
-            EspNowRate rate = EspNowRate::Auto;
-            if (!espnow_rate_parse(argv[3], &rate)) {
-                print_set_usage();
-                return 1;
-            }
-            err = espnow_manager_set_rate(rate);
-        } else if (argc == 4 && strcmp(argv[2], "gateway") == 0 &&
-                   strcmp(argv[3], "none") == 0) {
-            err = espnow_manager_clear_gateway();
-        } else if (argc == 5 && strcmp(argv[2], "gateway") == 0) {
-            uint32_t port = 0;
-            if (!parse_u32(argv[4], &port) || port == 0 || port > UINT16_MAX) {
-                print_set_usage();
-                return 1;
-            }
-            err = espnow_manager_set_gateway(argv[3], static_cast<uint16_t>(port));
-        } else {
-            print_set_usage();
-            return 1;
-        }
-        if (err != ESP_OK) {
-            printf("set espnow failed: %s\n", esp_err_to_name(err));
-            return 1;
-        }
-        return show_espnow_command();
     }
 
     if (strcmp(argv[1], "relay") == 0) {
@@ -2468,7 +2341,6 @@ int power4_help_command(int argc, char **argv)
     printf("  show board                  show the selected hardware profile\n");
     printf("  show debug                  show volatile debug settings\n");
     printf("  show ethernet               show Ethernet settings and link state\n");
-    printf("  show espnow                 show ESP-NOW configuration and counters\n");
     printf("  show inputs                 list digital input state\n");
     printf("  show logs                   print recent system log text\n");
     printf("  show password               reveal TCP password (serial only)\n");
@@ -2495,11 +2367,6 @@ int power4_help_command(int argc, char **argv)
     printf("  set ethernet dhcp           use DHCP and save the setting\n");
     printf("  set ethernet static <ip> <netmask> <gateway> [dns1] [dns2]\n");
     printf("  set ethernet phy <mode>     auto, 10-half, 10-full, 100-half, or 100-full\n");
-    printf("  set espnow name <name>      set the report sender name\n");
-    printf("  set espnow peer <name> <mac|none>\n");
-    printf("  set espnow channel <1-14|off>\n");
-    printf("  set espnow rate <auto|lr-500|lr-250>\n");
-    printf("  set espnow gateway <ipv4> <port>|none\n");
     printf("  set password [password]     generate or set TCP password (serial only)\n");
     printf("  set relay <n> on [seconds]  turn relay on for a bounded time\n");
     printf("  set relay <n> force-on      force relay on administratively\n");

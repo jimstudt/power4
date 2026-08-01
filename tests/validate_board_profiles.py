@@ -151,10 +151,8 @@ def validate_partition_table():
     assert factory[1:3] == ["app", "factory"]
     assert factory[3] == ""
     board_end = int(board[3], 0) + parse_size(board[4])
-    factory_offset = (board_end + 0xFFFF) & ~0xFFFF
-    assert factory_offset == 0x20000
-    assert parse_size(factory[4]) == 0x1C0000
-    assert factory_offset + parse_size(factory[4]) <= 0x200000
+    assert (board_end + 0xFFFF) & ~0xFFFF == 0x20000
+    assert parse_size(factory[4]) == 0x100000
 
 
 def validate_runtime_defaults():

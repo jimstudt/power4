@@ -8,7 +8,6 @@
 
 #include "battery_store.hpp"
 #include "ble_manager.hpp"
-#include "espnow_manager.hpp"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
@@ -1283,8 +1282,6 @@ esp_err_t run_scan(void)
         probe_battery(g_candidates[i]);
         vTaskDelay(pdMS_TO_TICKS(250));
     }
-
-    espnow_manager_publish_reports();
 
     return ESP_OK;
 }

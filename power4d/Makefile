@@ -30,6 +30,9 @@ $(BIN): $(SOURCES)
 
 test: build
 ifeq ($(HOST_TARGET),native)
+	@output="$$($(BIN))"; test "$$output" = 'hello world' || { \
+		printf 'unexpected power4d output: %s\n' "$$output" >&2; exit 1; \
+	}
 	$(SWIFT) test
 else
 	@printf 'tests cannot run locally for cross target %s\n' "$(HOST_TARGET)" >&2

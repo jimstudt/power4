@@ -58,9 +58,10 @@ To cut a release:
    the release warrants a minor or major bump instead, edit it first.
 2. Commit, then tag it `v<version>` (annotated, message style
    `power4 1.1.0: short summary`).
-3. `make package` for the firmware bundle; `make deb` on the Raspberry Pi
-   for a native Debian package, or `make deb HOST_TARGET=pi-trixie` on the
-   cross-build host.
+3. Activate ESP-IDF, then run `make package` for the firmware bundle and
+   `make deb` on the Raspberry Pi for a native Debian package, or
+   `make deb HOST_TARGET=pi-trixie` on the cross-build host. The Debian target
+   rebuilds and includes both complete board firmware images.
 4. `gh release create v<version>` with the tarball and `.deb` attached.
 5. Immediately bump the patch number in `version.txt` and commit, so
    development builds cannot be mistaken for the released version —

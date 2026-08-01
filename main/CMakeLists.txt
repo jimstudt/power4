@@ -11,8 +11,6 @@ idf_component_register(
         "config_flags.cpp"
         "console.cpp"
         "ethernet_manager.cpp"
-        "espnow_manager.cpp"
-        "espnow_protocol.cpp"
         "input_manager.cpp"
         "json_output.cpp"
         "log_buffer.cpp"
@@ -42,7 +40,6 @@ idf_component_register(
         esp_partition
         esp_system
         esp_timer
-        esp_wifi
         esp_netif
         freertos
         heap

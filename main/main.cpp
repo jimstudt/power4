@@ -6,7 +6,6 @@
 #include "board_i2c.hpp"
 #include "console.hpp"
 #include "ethernet_manager.hpp"
-#include "espnow_manager.hpp"
 #include "input_manager.hpp"
 #include "log_buffer.hpp"
 #include "network_console.hpp"
@@ -98,11 +97,6 @@ extern "C" void app_main(void)
         if (sntp_err != ESP_OK) {
             ESP_LOGE(kTag, "SNTP unavailable: %s", esp_err_to_name(sntp_err));
         }
-    }
-
-    const esp_err_t espnow_err = espnow_manager_init();
-    if (espnow_err != ESP_OK) {
-        ESP_LOGE(kTag, "ESP-NOW unavailable: %s", esp_err_to_name(espnow_err));
     }
 
     if (relay_control_ready) {
