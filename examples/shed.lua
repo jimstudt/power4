@@ -6,7 +6,7 @@
 --                    state of charge is the average of the two
 --
 -- Relays:
---   1  service raspberry pi (manual control only)
+--   1  service raspberry pi (normally on; deepSleep turns it off)
 --   2  48v -> 24v DC/DC converter, moves energy into the 24v banks
 --   3  generator run control, charges the 48v bank
 --   4  PoE switch for the cameras
@@ -14,7 +14,7 @@
 -- Policy parameters (define policy <name>=<value> [<seconds>s]).
 -- Parameter names are NVS keys, so they are limited to 15 characters.
 -- Boolean flags:
---   force_pi        hold the raspberry pi on
+--   deepSleep       turn off the service raspberry pi; defaults false
 --   force_48v_24v   hold the DC/DC converter on
 --   force_48v_gen   hold the generator on (overrides allow-generator)
 --   allow-generator defaults true; set false to suppress automatic
@@ -61,16 +61,19 @@ if ready24a and ready24b then
     soc24 = (soc24a + soc24b) / 2
 end
 
--- Service raspberry pi: manual control only. When force_pi is cleared or
--- expires we stop refreshing and let the long hold run out, so there is no
--- relay_off for the pi.
-if config_is_set("force_pi") then
+-- Service raspberry pi: normally kept on. Deep sleep opens its relay
+-- immediately; otherwise the long deadman hold is refreshed each cycle.
+local pi_on = relay_state(PI_RELAY)
+if config_bool("deepSleep", false) then
+    if pi_on then
+        relay_off(PI_RELAY)
+    end
+else
     relay_on(PI_RELAY, PI_HOLD_SECONDS)
 end
 
--- Camera PoE switch. Unlike the manual raspberry pi control, disabling the
--- cameras opens the relay immediately rather than waiting for its hold to
--- expire.
+-- Camera PoE switch. Disabling the cameras opens the relay immediately rather
+-- than waiting for its hold to expire.
 local poe_on = relay_state(POE_RELAY)
 if config_bool("enableCameras", false) then
     relay_on(POE_RELAY, HOLD_SECONDS)

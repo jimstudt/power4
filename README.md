@@ -741,7 +741,8 @@ lua examples/house_test.lua examples/house.lua
 a generator and a pair of paralleled 24v banks fed from the 48v bank through
 a DC/DC converter, with hysteresis, deadman holds, manual override flags,
 and tunable thresholds read from policy parameters. Relay 4 powers the camera
-PoE switch when the `enableCameras` policy boolean is true.
+PoE switch when the `enableCameras` policy boolean is true. Relay 1 keeps the
+service Raspberry Pi powered unless the `deepSleep` policy boolean is true.
 `examples/shed_test.lua` runs it against scripted scenarios on a host with a
 stock Lua 5.4 interpreter:
 

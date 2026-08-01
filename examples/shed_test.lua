@@ -68,6 +68,13 @@ local failures = 0
 local function scenario(label, env, expected)
     reset(env)
     dofile(POLICY)
+    if not config_bool("deepSleep", false) then
+        if expected == "" then
+            expected = "on(1,3600)"
+        else
+            expected = "on(1,3600) " .. expected
+        end
+    end
     local got = table.concat(calls, " ")
     if got ~= expected then
         failures = failures + 1
@@ -165,9 +172,17 @@ scenario("dcdc_source_min raised by parameter blocks transfer",
       numbers = { dcdc_source_min = 30, gen_start = 20 } },
     "")
 
-scenario("force_pi holds pi for an hour",
-    { banks = full, flags = { force_pi = true } },
-    "on(1,3600)")
+scenario("raspberry pi is held on by default",
+    { banks = full },
+    "")
+
+scenario("deepSleep turns off a running raspberry pi",
+    { banks = full, relays = { [1] = true }, flags = { deepSleep = true } },
+    "off(1)")
+
+scenario("deepSleep leaves an idle raspberry pi off",
+    { banks = full, flags = { deepSleep = true } },
+    "")
 
 scenario("enableCameras powers the PoE switch",
     { banks = full, flags = { enableCameras = true } },
@@ -197,8 +212,8 @@ scenario("48v missing: running relays left to deadman",
 
 scenario("48v missing but forces still work",
     { banks = {},
-      flags = { force_pi = true, force_48v_24v = true, force_48v_gen = true } },
-    "on(1,3600) on(2,300) on(3,300)")
+      flags = { force_48v_24v = true, force_48v_gen = true } },
+    "on(2,300) on(3,300)")
 
 if failures > 0 then
     print(string.format("%d scenario(s) failed", failures))
