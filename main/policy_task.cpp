@@ -13,6 +13,7 @@
 #include "rtc_manager.hpp"
 #include "time_manager.hpp"
 #include "esp_err.h"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -63,6 +64,16 @@ void policy_lua_hook(lua_State *state, lua_Debug *debug)
 void policy_syslog(const char *message)
 {
     ESP_LOGI(kTag, "%s", message);
+}
+
+void log_heap_failure(const char *operation)
+{
+    constexpr uint32_t caps = MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT;
+    ESP_LOGE(kTag,
+             "%s: internal_free=%u internal_largest=%u",
+             operation,
+             static_cast<unsigned>(heap_caps_get_free_size(caps)),
+             static_cast<unsigned>(heap_caps_get_largest_free_block(caps)));
 }
 
 void log_lua_error(lua_State *state, const char *phase)
@@ -468,7 +479,7 @@ bool run_lua_policy(const char *source, size_t length, const char *chunk_name, T
 {
     lua_State *state = luaL_newstate();
     if (state == nullptr) {
-        ESP_LOGE(kTag, "failed to create Lua state");
+        log_heap_failure("failed to create Lua state");
         return false;
     }
 
@@ -505,7 +516,13 @@ void run_policy_cycle(TickType_t deadline)
     size_t active_length = 0;
     esp_err_t err = policy_storage_read_alloc(PolicySlot::Active, &active_source, &active_length);
     if (err != ESP_OK) {
-        ESP_LOGW(kTag, "failed to read active policy: %s", esp_err_to_name(err));
+        ESP_LOGW(kTag,
+                 "failed to read active policy: %s internal_free=%u internal_largest=%u",
+                 esp_err_to_name(err),
+                 static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL |
+                                                               MALLOC_CAP_8BIT)),
+                 static_cast<unsigned>(heap_caps_get_largest_free_block(
+                     MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)));
         return;
     }
 
@@ -524,6 +541,11 @@ void run_policy_cycle(TickType_t deadline)
 void policy_task_main(void *arg)
 {
     (void)arg;
+
+    // The policy task has a deliberately large stack and Lua also needs a
+    // sizeable contiguous heap block. Let app_main finish and release its
+    // startup stack before the first Lua state is created.
+    vTaskDelay(pdMS_TO_TICKS(100));
 
     while (true) {
         const TickType_t cycle_start = xTaskGetTickCount();

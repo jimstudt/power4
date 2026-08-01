@@ -55,8 +55,13 @@ build:
 
 test:
 	python3 tests/validate_board_profiles.py
+	python3 tests/validate_espnow.py
 	python3 tests/validate_policy_size.py
 	python3 tests/validate_timezone.py
+	$(CXX) -std=c++17 -Wall -Wextra -Werror -I main \
+		tests/test_espnow_protocol.cpp main/espnow_protocol.cpp \
+		-o /tmp/power4-test-espnow-protocol
+	/tmp/power4-test-espnow-protocol
 	$(MAKE) -C power4ctl test
 
 package: build

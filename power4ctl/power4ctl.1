@@ -265,6 +265,18 @@ echoed to standard output until the
 prompt returns.
 This provides full access to the device's console without a separate
 terminal emulator.
+ESP-NOW configuration commands such as
+.B "show espnow"
+and
+.B "set espnow ..."
+are available through this passthrough mode; they do not add a separate
+.B power4ctl
+transport or daemon report.
+Use
+.B "set espnow rate auto|lr-500|lr-250"
+to select the device's persistent outbound ESP-NOW rate.  New firmware always
+enables reception of both ordinary and Espressif long-range frames, so the two
+directions may use different LR rates.
 .SH DAEMON OUTPUT FILES
 In daemon mode, six files are maintained under the output directory
 (default

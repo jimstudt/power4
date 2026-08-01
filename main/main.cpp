@@ -6,6 +6,7 @@
 #include "board_i2c.hpp"
 #include "console.hpp"
 #include "ethernet_manager.hpp"
+#include "espnow_manager.hpp"
 #include "input_manager.hpp"
 #include "log_buffer.hpp"
 #include "network_console.hpp"
@@ -17,8 +18,6 @@
 
 #include "esp_check.h"
 #include "esp_log.h"
-#include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
 
 namespace {
 
@@ -101,6 +100,11 @@ extern "C" void app_main(void)
         }
     }
 
+    const esp_err_t espnow_err = espnow_manager_init();
+    if (espnow_err != ESP_OK) {
+        ESP_LOGE(kTag, "ESP-NOW unavailable: %s", esp_err_to_name(espnow_err));
+    }
+
     if (relay_control_ready) {
         ESP_ERROR_CHECK(ble_manager_start());
         ESP_ERROR_CHECK(battery_scanner_start());
@@ -116,7 +120,7 @@ extern "C" void app_main(void)
         }
     }
 
-    while (true) {
-        vTaskDelay(pdMS_TO_TICKS(60000));
-    }
+    // app_main runs in an ordinary dynamically allocated FreeRTOS task.
+    // Returning lets ESP-IDF delete that task and reclaim its 6 KiB stack;
+    // every long-lived service started above owns its own task or callbacks.
 }

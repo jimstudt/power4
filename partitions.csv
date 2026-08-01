@@ -2,4 +2,4 @@
 nvs,      data, nvs,     0x9000,  64K,
 phy_init, data, phy,             , 4K,
 board_config, data, nvs, 0x1A000, 16K, readonly
-factory,  app,  factory,         , 1M,
+factory,  app,  factory,         , 1792K,
