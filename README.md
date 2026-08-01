@@ -14,8 +14,9 @@ uses that data as input to a Lua policy program that drives the relay outputs.
 Also included is `power4ctl` which is a control program for a computer attached
 to the USB port of the Waveshare.  It can query, control, and configure the unit.
 It also can run as a daemon to keep JSON files of the current conditions.
-`power4d` is a Swift host program that will take over additional daemon
-responsibilities as they are developed.
+`power4d` is a Swift host program that monitors UDP envelopes forwarded by
+ESP-NOW gateway nodes and will take over additional daemon responsibilities as
+they are developed.
 
 ## Make Targets
 
@@ -581,8 +582,12 @@ itself. `power4ctl` removes the dot stuffing and does not use the interactive
 prompt as an end-of-response marker. Direct human console commands remain
 unchanged.
 
-`power4d` lives under `power4d/` and is built with SwiftPM. It currently prints
-`hello world`; it does not install a service yet.
+`power4d` lives under `power4d/` and is built with SwiftPM. Its `monitor`
+command listens for IPv4 UDP datagrams from ESP-NOW gateway nodes, validates
+the outer JSON envelope, and prints a metadata summary followed by the decoded
+payload for each valid datagram.
+Malformed envelopes are diagnosed on standard error and ignored. It does not
+install a service yet.
 
 ### Building
 
@@ -631,6 +636,24 @@ The target must have a compatible Swift runtime installed under
 `power4ctl` Debian package while retaining the `power4ctl` command and service.
 
 ### Usage
+
+Start the gateway monitor on all IPv4 interfaces and its default UDP port,
+3366:
+
+```sh
+power4d monitor
+```
+
+The bind address must be a numeric IPv4 address. Both values can be overridden:
+
+```sh
+power4d monitor --address 127.0.0.1 --port 3366
+```
+
+The monitor validates only the outer `power4-espnow-gateway` version 1
+envelope for now. It checks MAC addresses, base64 encoding, and the declared
+decoded size, but does not yet parse or reassemble the nested `power4-espnow`
+payload.
 
 ```text
 power4ctl [-p port | -a address (-e name | -f file)] [-b baud] [-t seconds] [-v] command [args...]

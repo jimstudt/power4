@@ -10,6 +10,5 @@ Section: utils
 Priority: optional
 Description: Host tools for power4 controllers
  Installs power4ctl, the serial and authenticated TCP management client, and
- power4d, the Swift host daemon. The existing power4ctl systemd service keeps
- JSON state reports current for local consumers.
-
+ power4d, the Swift UDP monitor for ESP-NOW gateway envelopes. The existing
+ power4ctl systemd service keeps JSON state reports current for local consumers.

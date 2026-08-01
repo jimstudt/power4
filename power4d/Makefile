@@ -6,7 +6,7 @@ PROGRAM := power4d
 SWIFT_FLAGS := -c release $(SWIFT_BUILD_ARGS)
 BIN_DIR = $(shell $(SWIFT) build $(SWIFT_FLAGS) --show-bin-path)
 BIN = $(BIN_DIR)/$(PROGRAM)
-SOURCES := Package.swift Makefile ../mk/host-target.mk $(wildcard Sources/$(PROGRAM)/*.swift)
+SOURCES := Package.swift Package.resolved Makefile ../mk/host-target.mk $(wildcard Sources/*/*.swift)
 
 .PHONY: all build test install-deb print-bin clean check-target
 
@@ -30,9 +30,7 @@ $(BIN): $(SOURCES)
 
 test: build
 ifeq ($(HOST_TARGET),native)
-	@output="$$("$(BIN)")"; test "$$output" = 'hello world' || { \
-		printf 'unexpected power4d output: %s\n' "$$output" >&2; exit 1; \
-	}
+	$(SWIFT) test
 else
 	@printf 'tests cannot run locally for cross target %s\n' "$(HOST_TARGET)" >&2
 	@exit 1

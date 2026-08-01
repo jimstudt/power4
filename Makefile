@@ -229,7 +229,7 @@ help:
 		'  make reconfigure  Regenerate build system files' \
 		'  make set-target   Set ESP-IDF target, default: esp32s3' \
 		'  make power4ctl    Build the host management tool (power4ctl/)' \
-		'  make power4d      Build the Swift host daemon (power4d/)' \
+		'  make power4d      Build the Swift UDP monitor (power4d/)' \
 		'  make host         Build both Raspberry Pi host programs' \
 		'  make host-clean   Remove both host programs build outputs' \
 		'  make deb          Build one power4 Debian package with both programs' \

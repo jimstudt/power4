@@ -7,4 +7,5 @@ power4ctl/*.o
 power4ctl/*.deb
 power4ctl/.build/
 power4d/.build/
+power4d/.swiftpm/
 *.password
