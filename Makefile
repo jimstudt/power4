@@ -3,6 +3,10 @@
 # Keep common workflows here so day-to-day development does not require
 # remembering raw idf.py invocations.
 
+.DEFAULT_GOAL := all
+
+include mk/host-target.mk
+
 ESP_ACTIVATE ?= source "$$HOME/.espressif/tools/activate_idf_v6.0.1.sh"
 IDF_REQUIRED_TARGETS := all build package flash monitor menuconfig clean fullclean erase-flash size reconfigure set-target
 
@@ -27,6 +31,12 @@ BAUD ?= 115200
 BUILD_DIR ?= build
 PACKAGE_DIR ?= dist/power4-firmware
 PACKAGE_TARBALL ?= $(PACKAGE_DIR).tar.gz
+VERSION := $(strip $(shell cat version.txt))
+ifeq ($(VERSION),)
+$(error cannot read version from version.txt)
+endif
+DEB_STAGE := dist/deb/power4_$(VERSION)_$(DEB_ARCH)
+DEB_FILE := dist/power4_$(VERSION)_$(DEB_ARCH).deb
 SUPPORTED_BOARDS := relay-6ch poe-8ro
 BOARD_CONFIG_OFFSET := 0x1a000
 BOARD_CONFIG_SIZE := 0x4000
@@ -46,7 +56,8 @@ ifneq ($(strip $(BUILD_DIR)),)
 IDF_ARGS += -B $(BUILD_DIR)
 endif
 
-.PHONY: all build test package flash monitor menuconfig clean fullclean erase-flash size reconfigure set-target power4ctl power4ctl-clean deb help
+.PHONY: all build test package flash monitor menuconfig clean fullclean erase-flash size reconfigure set-target \
+	power4ctl power4d host power4ctl-clean power4d-clean host-clean deb check-host-target check-deb-target help
 
 all: build
 
@@ -63,6 +74,7 @@ test:
 		-o /tmp/power4-test-espnow-protocol
 	/tmp/power4-test-espnow-protocol
 	$(MAKE) -C power4ctl test
+	$(MAKE) -C power4d test
 
 package: build
 	@mkdir -p "$(PACKAGE_DIR)/bootloader" "$(PACKAGE_DIR)/partition_table" "$(PACKAGE_DIR)/board_config"
@@ -147,19 +159,64 @@ set-target:
 	$(IDF_PY) $(IDF_ARGS) set-target $(IDF_TARGET)
 
 power4ctl:
-	$(MAKE) -C power4ctl
+	$(MAKE) -C power4ctl HOST_TARGET="$(HOST_TARGET)"
+
+power4d:
+	$(MAKE) -C power4d HOST_TARGET="$(HOST_TARGET)"
+
+host: check-host-target power4ctl power4d
 
 power4ctl-clean:
 	$(MAKE) -C power4ctl clean
 
-deb:
-	$(MAKE) -C power4ctl deb
+power4d-clean:
+	$(MAKE) -C power4d clean
+
+host-clean: power4ctl-clean power4d-clean
+
+check-host-target:
+ifeq ($(HOST_TARGET),pi-trixie)
+	@test -d "$(SWIFT_SDK_SYSROOT)" || { \
+		printf 'Swift SDK sysroot not found: %s\n' "$(SWIFT_SDK_SYSROOT)" >&2; exit 1; \
+	}
+	@test -x "$(HOST_CC)" || { \
+		printf 'Swift SDK clang not found: %s\n' "$(HOST_CC)" >&2; exit 1; \
+	}
+	@test -x "$(word 1,$(HOST_STRIP))" || { \
+		printf 'ELF strip tool not found: %s\n' "$(word 1,$(HOST_STRIP))" >&2; exit 1; \
+	}
+endif
+
+check-deb-target: check-host-target
+ifeq ($(HOST_TARGET),native)
+	@case "$(DEB_ARCH)" in \
+		arm64|amd64) ;; \
+		*) printf 'native Debian packaging requires Linux; detected architecture: %s\n' "$(DEB_ARCH)" >&2; exit 1 ;; \
+	esac
+endif
+
+deb: check-deb-target host
+	rm -rf "$(DEB_STAGE)"
+	install -d "$(DEB_STAGE)/DEBIAN"
+	$(MAKE) -C power4ctl HOST_TARGET="$(HOST_TARGET)" DESTDIR="$(abspath $(DEB_STAGE))" install-deb
+	$(MAKE) -C power4d HOST_TARGET="$(HOST_TARGET)" DESTDIR="$(abspath $(DEB_STAGE))" install-deb
+	$(HOST_STRIP) "$(DEB_STAGE)/usr/bin/power4ctl"
+	$(HOST_STRIP) "$(DEB_STAGE)/usr/bin/power4d"
+	sed -e 's/@VERSION@/$(VERSION)/g' \
+	    -e 's/@ARCH@/$(DEB_ARCH)/g' \
+	    debian/control.in > "$(DEB_STAGE)/DEBIAN/control"
+	install -m 755 debian/postinst "$(DEB_STAGE)/DEBIAN/postinst"
+	install -m 755 debian/prerm "$(DEB_STAGE)/DEBIAN/prerm"
+	cp debian/conffiles "$(DEB_STAGE)/DEBIAN/conffiles"
+	dpkg-deb --build --root-owner-group "$(DEB_STAGE)" "$(DEB_FILE)"
+	rm -rf "$(DEB_STAGE)"
+	@printf 'Debian package written to %s\n' "$(DEB_FILE)"
 
 help:
 	@printf '%s\n' \
 		'power4 make targets:' \
 		'  make build        Build firmware with ESP-IDF' \
-		'  make test         Run board-profile and power4ctl protocol tests' \
+		'  make test         Run firmware logic and host-program tests' \
 		'  make package      Build and bundle binaries for Raspberry Pi flashing' \
 		'  make flash BOARD=relay-6ch|poe-8ro' \
 		'                    Flash firmware and the selected hardware profile' \
@@ -171,8 +228,11 @@ help:
 		'  make size         Show firmware size' \
 		'  make reconfigure  Regenerate build system files' \
 		'  make set-target   Set ESP-IDF target, default: esp32s3' \
-		'  make power4ctl   Build the host management tool (power4ctl/)' \
-		'  make deb          Build Debian package for power4ctl' \
+		'  make power4ctl    Build the host management tool (power4ctl/)' \
+		'  make power4d      Build the Swift host daemon (power4d/)' \
+		'  make host         Build both Raspberry Pi host programs' \
+		'  make host-clean   Remove both host programs build outputs' \
+		'  make deb          Build one power4 Debian package with both programs' \
 		'' \
 		'Variables:' \
 		'  IDF_PY=...        Path to idf.py, default: auto from ESP-IDF env or idf.py' \
@@ -181,4 +241,7 @@ help:
 		'  BAUD=...          Serial baud rate, default: 115200' \
 		'  BUILD_DIR=...     ESP-IDF build directory, default: build' \
 		'  PACKAGE_DIR=...   Firmware bundle directory, default: dist/power4-firmware' \
-		'  BOARD=...         Required by make flash: relay-6ch or poe-8ro'
+		'  BOARD=...         Required by make flash: relay-6ch or poe-8ro' \
+		'  HOST_TARGET=...   Host target: native (default) or pi-trixie' \
+		'  SWIFT_SDKS_DIR=... Override the directory containing Swift SDK bundles' \
+		'  SWIFT_SDK_DIR=... Override the installed Swift SDK variant directory'

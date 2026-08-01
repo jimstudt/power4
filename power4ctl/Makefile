@@ -1,79 +1,102 @@
+.DEFAULT_GOAL := all
+
 CC      ?= cc
 CFLAGS  ?= -Wall -Wextra -O2
-TARGET   = power4ctl
-# The release version is shared with the firmware; it lives in version.txt
-# at the repository root. See "Release Versioning" in AGENTS.md.
-VERSION := $(strip $(shell cat ../version.txt))
-ifeq ($(VERSION),)
-$(error cannot read version from ../version.txt)
+PROGRAM := power4ctl
+LIBS    := -ledit
+
+include ../mk/host-target.mk
+
+ifeq ($(HOST_TARGET),native)
+OUTPUT_DIR := .
+else
+OUTPUT_DIR := .build/$(HOST_TARGET)
 endif
-OBJS     = power4ctl.o sha1.o sha256.o
-LIBS     = -ledit
 
-BINDIR      = /usr/local/bin
-MANDIR      = /usr/local/share/man/man1
-SYSTEMDDIR  = /usr/lib/systemd/system
-DEFAULTSDIR = /etc/default
+TARGET      := $(OUTPUT_DIR)/$(PROGRAM)
+OBJS        := $(addprefix $(OUTPUT_DIR)/,power4ctl.o sha1.o sha256.o)
+TEST_SHA256 := $(OUTPUT_DIR)/test_sha256
+BUILD_CONFIG := Makefile ../mk/host-target.mk
 
-DEB_BINDIR  = /usr/bin
-DEB_MANDIR  = /usr/share/man/man1
+BINDIR      ?= /usr/local/bin
+MANDIR      ?= /usr/local/share/man/man1
+SYSTEMDDIR  ?= /usr/lib/systemd/system
+DEFAULTSDIR ?= /etc/default
 
-ARCH    := $(shell dpkg --print-architecture 2>/dev/null || \
-               uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')
-PKGROOT  = pkgroot
-PKGFILE  = $(TARGET)_$(VERSION)_$(ARCH).deb
+DEB_BINDIR := /usr/bin
+DEB_MANDIR := /usr/share/man/man1
 
-.PHONY: all test install uninstall deb clean
+.PHONY: all test install uninstall install-deb print-bin clean check-target
 
-all: $(TARGET)
+all: check-target $(TARGET)
+
+check-target:
+ifeq ($(HOST_TARGET),pi-trixie)
+	@test -x "$(HOST_CC)" || { \
+		printf 'Swift SDK clang not found: %s\n' "$(HOST_CC)" >&2; exit 1; \
+	}
+	@test -f "$(SWIFT_SDK_SYSROOT)/usr/include/histedit.h" || { \
+		printf 'libedit headers not found in Swift SDK sysroot: %s\n' "$(SWIFT_SDK_SYSROOT)" >&2; exit 1; \
+	}
+	@test -f "$(SWIFT_SDK_SYSROOT)/usr/lib/aarch64-linux-gnu/libedit.so" || { \
+		printf 'libedit library not found in Swift SDK sysroot: %s\n' "$(SWIFT_SDK_SYSROOT)" >&2; exit 1; \
+	}
+endif
 
 $(TARGET): $(OBJS)
-	$(CC) $(CFLAGS) -o $(TARGET) $(OBJS) $(LIBS)
+	$(HOST_CC) $(CFLAGS) $(HOST_LDFLAGS) -o $@ $(OBJS) $(LIBS)
 
-power4ctl.o: power4ctl.c sha1.h sha256.h
-	$(CC) $(CFLAGS) -c -o $@ power4ctl.c
+$(OUTPUT_DIR)/power4ctl.o: power4ctl.c sha1.h sha256.h $(BUILD_CONFIG) | $(OUTPUT_DIR)
+	$(HOST_CC) $(CFLAGS) $(HOST_CFLAGS) -c -o $@ power4ctl.c
 
-sha1.o: sha1.c sha1.h
-	$(CC) $(CFLAGS) -c -o $@ sha1.c
+$(OUTPUT_DIR)/sha1.o: sha1.c sha1.h $(BUILD_CONFIG) | $(OUTPUT_DIR)
+	$(HOST_CC) $(CFLAGS) $(HOST_CFLAGS) -c -o $@ sha1.c
 
-sha256.o: sha256.c sha256.h
-	$(CC) $(CFLAGS) -c -o $@ sha256.c
+$(OUTPUT_DIR)/sha256.o: sha256.c sha256.h $(BUILD_CONFIG) | $(OUTPUT_DIR)
+	$(HOST_CC) $(CFLAGS) $(HOST_CFLAGS) -c -o $@ sha256.c
 
-test_sha256: test_sha256.c sha256.c sha256.h
-	$(CC) $(CFLAGS) -o $@ test_sha256.c sha256.c
+$(OUTPUT_DIR):
+	mkdir -p $@
 
-test: $(TARGET) test_sha256
-	./test_sha256
+$(TEST_SHA256): test_sha256.c sha256.c sha256.h $(BUILD_CONFIG) | $(OUTPUT_DIR)
+	$(HOST_CC) $(CFLAGS) $(HOST_CFLAGS) $(HOST_LDFLAGS) -o $@ test_sha256.c sha256.c
+
+test: all $(TEST_SHA256)
+ifeq ($(HOST_TARGET),native)
+	./$(TEST_SHA256)
 	python3 test_tcp_console.py
+else
+	@printf 'tests cannot run locally for cross target %s\n' "$(HOST_TARGET)" >&2
+	@exit 1
+endif
 
-install: $(TARGET)
-	install -m 755 $(TARGET) $(BINDIR)/$(TARGET)
+install: all
+ifeq ($(HOST_TARGET),native)
+	install -m 755 $(TARGET) $(BINDIR)/$(PROGRAM)
 	install -d $(MANDIR)
-	gzip -c $(TARGET).1 > $(MANDIR)/$(TARGET).1.gz
+	gzip -c $(PROGRAM).1 > $(MANDIR)/$(PROGRAM).1.gz
+else
+	@printf 'install is only supported for HOST_TARGET=native\n' >&2
+	@exit 1
+endif
 
 uninstall:
-	rm -f $(BINDIR)/$(TARGET) $(MANDIR)/$(TARGET).1.gz
+	rm -f $(BINDIR)/$(PROGRAM) $(MANDIR)/$(PROGRAM).1.gz
 
-deb: $(TARGET)
-	rm -rf $(PKGROOT)
-	install -d $(PKGROOT)/DEBIAN \
-	           $(PKGROOT)/$(DEB_BINDIR) \
-	           $(PKGROOT)/$(DEB_MANDIR) \
-	           $(PKGROOT)/$(SYSTEMDDIR) \
-	           $(PKGROOT)/$(DEFAULTSDIR)
-	install -m 755 $(TARGET) $(PKGROOT)/$(DEB_BINDIR)/$(TARGET)
-	gzip -c $(TARGET).1 > $(PKGROOT)/$(DEB_MANDIR)/$(TARGET).1.gz
-	install -m 644 $(TARGET).service $(PKGROOT)/$(SYSTEMDDIR)/$(TARGET).service
-	install -m 644 $(TARGET).default $(PKGROOT)/$(DEFAULTSDIR)/$(TARGET)
-	sed -e 's/@VERSION@/$(VERSION)/g' \
-	    -e 's/@ARCH@/$(ARCH)/g' \
-	    debian/control.in > $(PKGROOT)/DEBIAN/control
-	install -m 755 debian/postinst $(PKGROOT)/DEBIAN/postinst
-	install -m 755 debian/prerm    $(PKGROOT)/DEBIAN/prerm
-	cp debian/conffiles            $(PKGROOT)/DEBIAN/conffiles
-	dpkg-deb --build --root-owner-group $(PKGROOT) $(PKGFILE)
-	rm -rf $(PKGROOT)
+install-deb: all
+	@test -n "$(DESTDIR)" || { printf 'DESTDIR is required\n' >&2; exit 1; }
+	install -d "$(DESTDIR)$(DEB_BINDIR)" \
+	           "$(DESTDIR)$(DEB_MANDIR)" \
+	           "$(DESTDIR)$(SYSTEMDDIR)" \
+	           "$(DESTDIR)$(DEFAULTSDIR)"
+	install -m 755 "$(TARGET)" "$(DESTDIR)$(DEB_BINDIR)/$(PROGRAM)"
+	gzip -c $(PROGRAM).1 > "$(DESTDIR)$(DEB_MANDIR)/$(PROGRAM).1.gz"
+	install -m 644 $(PROGRAM).service "$(DESTDIR)$(SYSTEMDDIR)/$(PROGRAM).service"
+	install -m 644 $(PROGRAM).default "$(DESTDIR)$(DEFAULTSDIR)/$(PROGRAM)"
+
+print-bin:
+	@printf '%s\n' "$(TARGET)"
 
 clean:
-	rm -f $(TARGET) $(OBJS) test_sha256
-	rm -rf $(PKGROOT) $(TARGET)_*.deb
+	rm -f $(PROGRAM) power4ctl.o sha1.o sha256.o test_sha256
+	rm -rf .build

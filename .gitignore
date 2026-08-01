@@ -5,4 +5,6 @@ power4ctl/power4ctl
 power4ctl/test_sha256
 power4ctl/*.o
 power4ctl/*.deb
+power4ctl/.build/
+power4d/.build/
 *.password

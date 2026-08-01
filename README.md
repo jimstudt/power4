@@ -14,6 +14,8 @@ uses that data as input to a Lua policy program that drives the relay outputs.
 Also included is `power4ctl` which is a control program for a computer attached
 to the USB port of the Waveshare.  It can query, control, and configure the unit.
 It also can run as a daemon to keep JSON files of the current conditions.
+`power4d` is a Swift host program that will take over additional daemon
+responsibilities as they are developed.
 
 ## Make Targets
 
@@ -29,7 +31,9 @@ make monitor      # open ESP-IDF serial monitor
 make menuconfig   # open ESP-IDF configuration UI
 make clean        # remove build outputs
 make power4ctl    # build the host management tool
-make deb          # build Debian package for power4ctl
+make power4d      # build the Swift host program
+make host         # build both host programs
+make deb          # build one Debian package containing both host programs
 ```
 
 The project target defaults to `esp32s3`. Activate ESP-IDF before running
@@ -563,7 +567,7 @@ Unset write value: one flag name to unset.
 BLE access is currently unauthenticated. Any nearby BLE client that can connect
 can read relay states, read config flags, and set or unset config flags.
 
-## power4ctl
+## Host tools
 
 `power4ctl` is the host-side management tool for the controller. It lives under
 `power4ctl/` and is built independently of ESP-IDF. It connects over USB serial
@@ -577,19 +581,35 @@ itself. `power4ctl` removes the dot stuffing and does not use the interactive
 prompt as an end-of-response marker. Direct human console commands remain
 unchanged.
 
+`power4d` lives under `power4d/` and is built with SwiftPM. It currently prints
+`hello world`; it does not install a service yet.
+
 ### Building
 
 From the top-level directory:
 
 ```sh
-make power4ctl
+make host
 ```
 
-Or directly:
+Each program can also be built separately:
 
 ```sh
 make -C power4ctl
+make -C power4d
 ```
+
+To cross-compile both programs for 64-bit Raspberry Pi OS Trixie using the
+installed Swift SDK:
+
+```sh
+make host HOST_TARGET=pi-trixie
+```
+
+The SDK defaults to `swift-6.0.3-debian13-aarch64`. Set `SWIFT_SDKS_DIR` if the
+bundle is installed somewhere other than SwiftPM's standard
+`~/Library/org.swift.swiftpm/swift-sdks` location. `SWIFT_SDK_DIR` can override
+the derived target-variant directory used by the C cross compiler.
 
 ### Installing
 
@@ -597,12 +617,18 @@ make -C power4ctl
 make -C power4ctl install        # installs to /usr/local/bin
 ```
 
-A Debian package for the current architecture can be built and installed with:
+A single Debian package containing both host programs can be built natively on
+Debian or cross-built on macOS:
 
 ```sh
-make -C power4ctl deb
-sudo dpkg -i power4ctl/power4ctl_1.0.1_arm64.deb
+make deb                         # native Debian build
+make deb HOST_TARGET=pi-trixie  # ARM64 Trixie cross build
+sudo dpkg -i "dist/power4_$(cat version.txt)_arm64.deb"
 ```
+
+The target must have a compatible Swift runtime installed under
+`/usr/libexec/swift/lib/swift/linux`. Installing `power4` replaces the former
+`power4ctl` Debian package while retaining the `power4ctl` command and service.
 
 ### Usage
 

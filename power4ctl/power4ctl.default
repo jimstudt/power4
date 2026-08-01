@@ -1,4 +1,4 @@
-# Configuration for power4ctl daemon (/usr/local/bin/power4ctl -D)
+# Configuration for power4ctl daemon (/usr/bin/power4ctl -D)
 # See power4ctl(1) for details on each option.
 # Uncomment and edit a line to override the compiled-in default.
 

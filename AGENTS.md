@@ -43,12 +43,12 @@ Keep new developer workflows behind Make targets when they become routine.
 
 `version.txt` at the repository root is the single source of the release
 number, as a bare semver like `1.1.1` (no leading `v`). The firmware and
-the power4ctl Debian package always share this number:
+the power4 Debian package always share this number:
 
 - ESP-IDF automatically uses a project-root `version.txt` as the app
   version (it overrides `git describe`), so the firmware reports it.
-- `power4ctl/Makefile` reads `../version.txt` for the `.deb` version and
-  package filename.
+- The top-level `Makefile` reads `version.txt` for the combined host-tools
+  `.deb` version and package filename.
 
 Do not hardcode a version anywhere else; read it from `version.txt`.
 
@@ -59,7 +59,8 @@ To cut a release:
 2. Commit, then tag it `v<version>` (annotated, message style
    `power4 1.1.0: short summary`).
 3. `make package` for the firmware bundle; `make deb` on the Raspberry Pi
-   for the Debian package.
+   for a native Debian package, or `make deb HOST_TARGET=pi-trixie` on the
+   cross-build host.
 4. `gh release create v<version>` with the tarball and `.deb` attached.
 5. Immediately bump the patch number in `version.txt` and commit, so
    development builds cannot be mistaken for the released version —
