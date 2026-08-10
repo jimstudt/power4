@@ -10,6 +10,7 @@
 #include "ble_manager.hpp"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
+#include "jbd_protocol.hpp"
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
 #include "freertos/task.h"
@@ -25,6 +26,8 @@ extern "C" {
 }
 
 namespace {
+
+static_assert(kBatteryCellMax == kJbdMaxCells);
 
 constexpr const char *kTag = "battery_scanner";
 constexpr uint16_t kJbdServiceUuid = 0xff00;
@@ -110,6 +113,7 @@ struct ProbeState {
     int status = 0;
     uint8_t rx[kJbdRxBufferSize] = {};
     size_t rx_len = 0;
+    uint8_t expected_command = 0;
     size_t packet_offset = 0;
     size_t packet_len = 0;
 };
@@ -184,70 +188,6 @@ bool uuid_is16(const ble_uuid_t *uuid, uint16_t value)
     return reinterpret_cast<const ble_uuid16_t *>(uuid)->value == value;
 }
 
-uint16_t read_be16(const uint8_t *data)
-{
-    return static_cast<uint16_t>(data[0]) << 8 | static_cast<uint16_t>(data[1]);
-}
-
-int16_t read_be16_signed(const uint8_t *data)
-{
-    return static_cast<int16_t>(read_be16(data));
-}
-
-uint16_t jbd_checksum(const uint8_t *data, size_t length)
-{
-    uint16_t sum = 0;
-    for (size_t i = 0; i < length; ++i) {
-        sum = static_cast<uint16_t>(sum + data[i]);
-    }
-    return static_cast<uint16_t>(0 - sum);
-}
-
-bool jbd_checksum_matches(const uint8_t *frame, size_t start, size_t data_len)
-{
-    const size_t checksum_offset = start + 4 + data_len;
-    const uint16_t received = read_be16(frame + checksum_offset);
-
-    if (received == jbd_checksum(frame + start + 2, data_len + 2)) {
-        return true;
-    }
-
-    return received == jbd_checksum(frame + start + 1, data_len + 3);
-}
-
-bool find_jbd_basic_packet(const uint8_t *data, size_t length, size_t *offset, size_t *packet_len)
-{
-    for (size_t i = 0; i < length; ++i) {
-        if (data[i] != 0xdd) {
-            continue;
-        }
-        if (length - i < 7) {
-            return false;
-        }
-        if (data[i + 1] != 0x03 || data[i + 2] != 0x00) {
-            continue;
-        }
-
-        const size_t body_len = data[i + 3];
-        const size_t total_len = body_len + 7;
-        if (length - i < total_len) {
-            return false;
-        }
-        if (data[i + total_len - 1] != 0x77) {
-            continue;
-        }
-        if (!jbd_checksum_matches(data, i, body_len)) {
-            continue;
-        }
-
-        *offset = i;
-        *packet_len = total_len;
-        return true;
-    }
-
-    return false;
-}
-
 bool char_can_notify(uint16_t properties)
 {
     return (properties & BLE_GATT_CHR_F_NOTIFY) != 0;
@@ -258,91 +198,43 @@ bool char_can_write(uint16_t properties)
     return (properties & (BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_WRITE_NO_RSP)) != 0;
 }
 
-void log_jbd_basic_info(const char *battery_name, const uint8_t *frame, size_t length)
+void log_jbd_basic_info(const char *battery_name, const JbdBasicInfo &info)
 {
-    if (length < 27 || frame[3] < 23) {
-        ESP_LOGW(kTag, "JBD basic info packet too short to decode: battery=%s len=%u",
-                 battery_name,
-                 static_cast<unsigned>(length));
-        return;
-    }
-
-    const float voltage_v = read_be16(frame + 4) / 100.0f;
-    const float current_a = read_be16_signed(frame + 6) / 100.0f;
-    const float residual_ah = read_be16(frame + 8) / 100.0f;
-    const float nominal_ah = read_be16(frame + 10) / 100.0f;
-    const uint16_t cycles = read_be16(frame + 12);
-    const uint16_t protection = read_be16(frame + 20);
-    const uint8_t version = frame[22];
-    const uint8_t soc_percent = frame[23];
-    const uint8_t fet_status = frame[24];
-    const uint8_t cell_count = frame[25];
-    const uint8_t ntc_count = frame[26];
-
-    float avg_temp_c = 0.0f;
-    uint8_t decoded_temps = 0;
-    for (uint8_t i = 0; i < ntc_count; ++i) {
-        const size_t offset = 27 + (i * 2);
-        if (offset + 1 >= length - 3) {
-            break;
-        }
-        avg_temp_c += (read_be16(frame + offset) - 2731) / 10.0f;
-        ++decoded_temps;
-    }
-    if (decoded_temps > 0) {
-        avg_temp_c /= decoded_temps;
-    }
-
-    const bool temperature_valid = decoded_temps > 0;
-    const esp_err_t err = battery_store_record_observation(battery_name,
-                                                           voltage_v,
-                                                           current_a,
-                                                           soc_percent,
-                                                           cycles,
-                                                           temperature_valid,
-                                                           avg_temp_c);
-    if (err != ESP_OK) {
-        ESP_LOGW(kTag,
-                 "failed to record battery observation: battery=%s err=%s",
-                 battery_name,
-                 esp_err_to_name(err));
-    }
-
     if (!g_verbose_battery_scanning) {
         return;
     }
 
-    if (decoded_temps > 0) {
+    if (info.temperature_valid) {
         ESP_LOGI(kTag,
                  "JBD basic info: battery=%s voltage=%.2fV current=%.2fA soc=%u%% residual=%.2fAh nominal=%.2fAh cycles=%u protection=0x%04x fet=0x%02x cells=%u ntc=%u avg_temp=%.1fC version=%u",
                  battery_name,
-                 voltage_v,
-                 current_a,
-                 soc_percent,
-                 residual_ah,
-                 nominal_ah,
-                 cycles,
-                 protection,
-                 fet_status,
-                 cell_count,
-                 ntc_count,
-                 avg_temp_c,
-                 version);
+                 info.voltage_v,
+                 info.current_a,
+                 info.soc_percent,
+                 info.residual_ah,
+                 info.nominal_ah,
+                 info.cycle_count,
+                 info.protection_status,
+                 info.fet_status,
+                 info.cell_count,
+                 info.ntc_count,
+                 info.average_temperature_c,
+                 info.version);
     } else {
         ESP_LOGI(kTag,
                  "JBD basic info: battery=%s voltage=%.2fV current=%.2fA soc=%u%% residual=%.2fAh nominal=%.2fAh cycles=%u protection=0x%04x fet=0x%02x cells=%u ntc=%u version=%u",
                  battery_name,
-                 voltage_v,
-                 current_a,
-                 soc_percent,
-                 residual_ah,
-                 nominal_ah,
-                 cycles,
-                 protection,
-                 fet_status,
-                 cell_count,
-                 ntc_count,
-                 version);
+                 info.voltage_v,
+                 info.current_a,
+                 info.soc_percent,
+                 info.residual_ah,
+                 info.nominal_ah,
+                 info.cycle_count,
+                 info.protection_status,
+                 info.fet_status,
+                 info.cell_count,
+                 info.ntc_count,
+                 info.version);
     }
 }
 
@@ -827,10 +719,12 @@ void consume_jbd_notification(const ble_gap_event *event)
     memcpy(&g_probe.rx[g_probe.rx_len], chunk, copy_len);
 
     g_probe.rx_len += len;
-    if (find_jbd_basic_packet(g_probe.rx,
-                              g_probe.rx_len,
-                              &g_probe.packet_offset,
-                              &g_probe.packet_len)) {
+    if (g_probe.expected_command != 0 &&
+        jbd_find_packet(g_probe.rx,
+                        g_probe.rx_len,
+                        g_probe.expected_command,
+                        &g_probe.packet_offset,
+                        &g_probe.packet_len)) {
         xEventGroupSetBits(g_scanner_events, kProbePacketDoneBit);
     }
 }
@@ -1051,9 +945,18 @@ bool subscribe_probe_notifications(void)
     return true;
 }
 
-bool send_basic_info_request(void)
+bool send_jbd_request(uint8_t command, const char *description)
 {
-    static constexpr uint8_t request[] = {0xdd, 0xa5, 0x03, 0x00, 0xff, 0xfd, 0x77};
+    uint8_t request[] = {0xdd, 0xa5, command, 0x00, 0x00, 0x00, 0x77};
+    const uint16_t checksum = jbd_checksum(request + 2, 2);
+    request[4] = static_cast<uint8_t>(checksum >> 8);
+    request[5] = static_cast<uint8_t>(checksum);
+
+    g_probe.expected_command = command;
+    g_probe.rx_len = 0;
+    g_probe.packet_offset = 0;
+    g_probe.packet_len = 0;
+    xEventGroupClearBits(g_scanner_events, kProbeWriteDoneBit | kProbePacketDoneBit);
 
     if ((g_probe.write_properties & BLE_GATT_CHR_F_WRITE_NO_RSP) != 0) {
         const int rc = ble_gattc_write_no_rsp_flat(g_probe.conn_handle,
@@ -1061,7 +964,10 @@ bool send_basic_info_request(void)
                                                   request,
                                                   sizeof(request));
         if (rc != 0) {
-            ESP_LOGW(kTag, "failed to send JBD basic info request without response: rc=%d", rc);
+            ESP_LOGW(kTag,
+                     "failed to send JBD %s request without response: rc=%d",
+                     description,
+                     rc);
             return false;
         }
         return true;
@@ -1074,11 +980,36 @@ bool send_basic_info_request(void)
                                         write_complete,
                                         nullptr);
     if (rc != 0 || !wait_for_probe_bits(kProbeWriteDoneBit, kInterrogationTimeoutTicks)) {
-        ESP_LOGW(kTag, "failed to send JBD basic info request: rc=%d status=%d", rc, g_probe.status);
+        ESP_LOGW(kTag,
+                 "failed to send JBD %s request: rc=%d status=%d",
+                 description,
+                 rc,
+                 g_probe.status);
         return false;
     }
 
     return true;
+}
+
+bool request_jbd_packet(uint8_t command, const char *description)
+{
+    if (!send_jbd_request(command, description)) {
+        return false;
+    }
+
+    if (wait_for_probe_bits(kProbePacketDoneBit, kJbdCommandRetryTicks)) {
+        return true;
+    }
+
+    if (!send_jbd_request(command, description)) {
+        return false;
+    }
+    if (wait_for_probe_bits(kProbePacketDoneBit, kInterrogationTimeoutTicks)) {
+        return true;
+    }
+
+    ESP_LOGW(kTag, "no valid JBD %s packet before timeout", description);
+    return false;
 }
 
 void probe_battery(const BatteryCandidate &candidate)
@@ -1130,29 +1061,77 @@ void probe_battery(const BatteryCandidate &candidate)
         return;
     }
 
-    if (!discover_probe_handles() || !subscribe_probe_notifications() || !send_basic_info_request()) {
+    if (!discover_probe_handles() || !subscribe_probe_notifications()) {
         disconnect_probe(addr);
         return;
     }
 
-    bool got_packet = wait_for_probe_bits(kProbePacketDoneBit, kJbdCommandRetryTicks);
-    if (!got_packet) {
-        if (!send_basic_info_request()) {
-            disconnect_probe(addr);
-            return;
-        }
-        got_packet = wait_for_probe_bits(kProbePacketDoneBit, kInterrogationTimeoutTicks);
+    if (!request_jbd_packet(kJbdBasicInfoCommand, "basic info")) {
+        disconnect_probe(addr);
+        return;
     }
 
-    if (got_packet) {
+    if (g_verbose_battery_scanning) {
+        printf("JBD basic info packet: addr=%s data=", addr);
+        print_bytes_hex_size(&g_probe.rx[g_probe.packet_offset], g_probe.packet_len);
+        printf("\n");
+    }
+
+    JbdBasicInfo basic = {};
+    if (!jbd_parse_basic_info(&g_probe.rx[g_probe.packet_offset], g_probe.packet_len, &basic)) {
+        ESP_LOGW(kTag, "failed to decode JBD basic info packet: addr=%s", addr);
+        disconnect_probe(addr);
+        return;
+    }
+    log_jbd_basic_info(battery_name, basic);
+
+    BatteryObservation observation = {};
+    observation.voltage_v = basic.voltage_v;
+    observation.current_a = basic.current_a;
+    observation.soc_percent = static_cast<float>(basic.soc_percent);
+    observation.cycle_count = basic.cycle_count;
+    observation.protection_status = basic.protection_status;
+    observation.reported_cell_count = basic.cell_count;
+    observation.temperature_valid = basic.temperature_valid;
+    observation.temperature_c = basic.average_temperature_c;
+
+    if (basic.cell_count > kBatteryCellMax) {
+        ESP_LOGW(kTag,
+                 "JBD battery reports unsupported cell count: battery=%s cells=%u max=%u",
+                 battery_name,
+                 basic.cell_count,
+                 static_cast<unsigned>(kBatteryCellMax));
+    } else if (request_jbd_packet(kJbdCellInfoCommand, "cell info")) {
         if (g_verbose_battery_scanning) {
-            printf("JBD basic info packet: addr=%s data=", addr);
+            printf("JBD cell info packet: addr=%s data=", addr);
             print_bytes_hex_size(&g_probe.rx[g_probe.packet_offset], g_probe.packet_len);
             printf("\n");
         }
-        log_jbd_basic_info(battery_name, &g_probe.rx[g_probe.packet_offset], g_probe.packet_len);
-    } else {
-        ESP_LOGW(kTag, "no valid JBD basic info packet before timeout: addr=%s", addr);
+
+        JbdCellInfo cells = {};
+        if (jbd_parse_cell_info(&g_probe.rx[g_probe.packet_offset],
+                                g_probe.packet_len,
+                                basic.cell_count,
+                                &cells)) {
+            observation.cell_voltages_valid = true;
+            observation.cell_voltage_count = cells.count;
+            memcpy(observation.cell_voltages_mv,
+                   cells.voltage_mv,
+                   cells.count * sizeof(cells.voltage_mv[0]));
+        } else {
+            ESP_LOGW(kTag,
+                     "invalid JBD cell info packet: battery=%s expected_cells=%u",
+                     battery_name,
+                     basic.cell_count);
+        }
+    }
+
+    const esp_err_t store_err = battery_store_record_observation(battery_name, &observation);
+    if (store_err != ESP_OK) {
+        ESP_LOGW(kTag,
+                 "failed to record battery observation: battery=%s err=%s",
+                 battery_name,
+                 esp_err_to_name(store_err));
     }
 
     disconnect_probe(addr);

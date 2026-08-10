@@ -1,6 +1,7 @@
 #pragma once
 
 #include <stddef.h>
+#include <stdint.h>
 
 #include "battery_store.hpp"
 #include "esp_err.h"
@@ -24,6 +25,13 @@ struct BatteryBankState {
     float voltage_v;
     float current_a;
     float soc_percent;
+    uint16_t protection_status;
+    bool cell_data_ready;
+    float min_cell_voltage_v;
+    uint32_t cell_age_s;
+    char min_cell_battery[kBatteryNameMax + 1];
+    uint8_t min_cell_number;
+    bool cell_undervoltage_protection;
 };
 
 esp_err_t battery_bank_init(void);

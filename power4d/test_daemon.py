@@ -22,6 +22,13 @@ REPORTS = ["batteries", "banks", "relays", "inputs", "parameters", "logs"]
 
 
 def report_json(name):
+    if name == "batteries":
+        return (
+            '{"type":"battery_state","batteries":['
+            '{"name":"test","protection_status":2,'
+            '"cell_undervoltage_protection":true,'
+            '"cell_voltages_v":[3.095,3.241]}]}'
+        )
     return f'{{"type":"test","report":"{name}"}}'
 
 

@@ -198,6 +198,7 @@ show relays
 show ble
 show batteries
 show banks
+show cells
 show board
 show ethernet
 show inputs
@@ -355,8 +356,8 @@ line in alphabetical order and reports lifetime values as
 `name=value (remaining/authorized)`, for example `gen_running=true (287/300s)`.
 
 BLE scanner debug logging defaults to off. Turning it on prints advertisement
-details, scan summaries, raw JBD basic-info packets, and decoded battery packet
-details.
+details, scan summaries, raw JBD basic-info and cell-info packets, and decoded
+battery packet details.
 
 Battery observation examples:
 
@@ -366,15 +367,21 @@ report batteries
 ```
 
 Battery observations are kept in memory by name. Each record contains voltage,
-current, state of charge, temperature when reported, cycle count, and last
-update time. The BLE battery code records observations from decoded JBD battery
-packets.
+current, state of charge, temperature when reported, cycle count, JBD protection
+status, and last update time. `show batteries` includes the raw hexadecimal JBD
+protection status. The scanner reads JBD basic information with
+command `0x03`, then reads individual cell voltages with command `0x04` over the
+same BLE connection. Cell readings include their own timestamp; a failed cell
+request retains the last valid readings so their increasing age remains visible
+in `show cells` and `report batteries`.
 
 Battery bank examples:
 
 ```text
 define bank house pack_a pack_b
 show banks
+show cells
+show cells pack_a
 report banks
 remove bank house
 ```
@@ -382,8 +389,15 @@ remove bank house
 Battery banks are stored persistently in the `config` NVS namespace. A bank has
 a name and one or more battery names. Bank state is computed from observed
 battery state: voltage is the sum of member voltages, current is the maximum
-member current, and state of charge is the minimum member state of charge. If
-any member battery has not been observed, the bank state is `not-ready`.
+member current, and state of charge is the minimum member state of charge. Bank
+cell voltage is the minimum cell across all members, and the cell-undervoltage
+protection value is true when any member's JBD protection bit 1 is set. The raw
+bank protection status is the bitwise OR of all member protection masks.
+`show cells` prints each configured bank, a current and cell summary for each
+member battery, one voltage line per cell, and an `unbanked` section for any
+observed batteries not referenced by a bank. `show cells <battery>` limits the
+output to one observed battery whether or not it belongs to a bank. If any
+member battery has not been observed, the bank state is `not-ready`.
 
 Policy execution runs from the `policy_active` NVS key. The policy task creates
 a fresh Lua environment once per minute, loads the active policy, executes it,
@@ -406,9 +420,14 @@ config_bool("allow-generator", true) -- boolean parameter, or the default (nil i
 config_number("b24_low_limit", 40) -- numeric parameter, or the default (nil if omitted) when unset
 syslog("policy reached generator_ok check") -- emit through ESP logging
 
-ready, volts, amps, soc = battery_bank_state("house")
+ready, volts, amps, soc, min_cell_v, cell_age_s, cell_undervoltage =
+    battery_bank_state("house")
 names = battery_bank_names()
 ```
+
+The first four `battery_bank_state()` results are unchanged. `min_cell_v` and
+`cell_age_s` are `nil` until every bank member has valid cell data;
+`cell_undervoltage` is the aggregate JBD cell-undervoltage protection alarm.
 
 `input_on()` raises a policy error when the requested input is not configured.
 `rtc_time()` raises a policy error when the RTC is absent or cannot be read.

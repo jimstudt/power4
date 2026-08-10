@@ -57,21 +57,37 @@ int find_least_recently_seen(void)
 
 void write_record(BatterySlot *slot,
                   const char *name,
-                  float voltage_v,
-                  float current_a,
-                  float soc_percent,
-                  uint16_t cycle_count,
-                  bool temperature_valid,
-                  float temperature_c,
+                  const BatteryObservation &observation,
                   int64_t now_us)
 {
+    const bool preserve_cells =
+        slot->occupied && slot->record.cell_voltages_valid &&
+        slot->record.reported_cell_count == observation.reported_cell_count;
+
     strlcpy(slot->record.name, name, sizeof(slot->record.name));
-    slot->record.voltage_v = voltage_v;
-    slot->record.current_a = current_a;
-    slot->record.soc_percent = soc_percent;
-    slot->record.cycle_count = cycle_count;
-    slot->record.temperature_valid = temperature_valid;
-    slot->record.temperature_c = temperature_c;
+    slot->record.voltage_v = observation.voltage_v;
+    slot->record.current_a = observation.current_a;
+    slot->record.soc_percent = observation.soc_percent;
+    slot->record.cycle_count = observation.cycle_count;
+    slot->record.protection_status = observation.protection_status;
+    slot->record.reported_cell_count = observation.reported_cell_count;
+    slot->record.temperature_valid = observation.temperature_valid;
+    slot->record.temperature_c = observation.temperature_c;
+
+    if (observation.cell_voltages_valid) {
+        slot->record.cell_voltages_valid = true;
+        slot->record.cell_voltage_count = observation.cell_voltage_count;
+        memcpy(slot->record.cell_voltages_mv,
+               observation.cell_voltages_mv,
+               observation.cell_voltage_count * sizeof(observation.cell_voltages_mv[0]));
+        slot->record.cell_last_seen_us = now_us;
+    } else if (!preserve_cells) {
+        slot->record.cell_voltages_valid = false;
+        slot->record.cell_voltage_count = 0;
+        memset(slot->record.cell_voltages_mv, 0, sizeof(slot->record.cell_voltages_mv));
+        slot->record.cell_last_seen_us = 0;
+    }
+
     slot->record.last_seen_us = now_us;
     slot->occupied = true;
 }
@@ -117,15 +133,13 @@ size_t battery_store_capacity(void)
     return CONFIG_POWER4_MAX_BATTERIES;
 }
 
-esp_err_t battery_store_record_observation(const char *name,
-                                           float voltage_v,
-                                           float current_a,
-                                           float soc_percent,
-                                           uint16_t cycle_count,
-                                           bool temperature_valid,
-                                           float temperature_c)
+esp_err_t battery_store_record_observation(const char *name, const BatteryObservation *observation)
 {
-    if (!battery_store_valid_name(name)) {
+    if (!battery_store_valid_name(name) || observation == nullptr ||
+        (observation->cell_voltages_valid &&
+         (observation->cell_voltage_count == 0 ||
+          observation->cell_voltage_count > kBatteryCellMax ||
+          observation->cell_voltage_count != observation->reported_cell_count))) {
         return ESP_ERR_INVALID_ARG;
     }
 
@@ -147,15 +161,7 @@ esp_err_t battery_store_record_observation(const char *name,
                  name);
     }
 
-    write_record(&g_batteries[slot_index],
-                 name,
-                 voltage_v,
-                 current_a,
-                 soc_percent,
-                 cycle_count,
-                 temperature_valid,
-                 temperature_c,
-                 now_us);
+    write_record(&g_batteries[slot_index], name, *observation, now_us);
     return ESP_OK;
 }
 
@@ -225,4 +231,45 @@ esp_err_t battery_store_snapshot(BatteryRecord *records, size_t capacity, size_t
     }
 
     return ESP_OK;
+}
+
+bool battery_record_cell_summary(const BatteryRecord *record, BatteryCellSummary *summary)
+{
+    if (record == nullptr || summary == nullptr || !record->cell_voltages_valid ||
+        record->cell_voltage_count == 0 || record->cell_voltage_count > kBatteryCellMax) {
+        return false;
+    }
+
+    BatteryCellSummary computed = {
+        .min_voltage_v = record->cell_voltages_mv[0] / 1000.0f,
+        .max_voltage_v = record->cell_voltages_mv[0] / 1000.0f,
+        .delta_voltage_v = 0.0f,
+        .min_cell_number = 1,
+        .max_cell_number = 1,
+    };
+    for (uint8_t i = 1; i < record->cell_voltage_count; ++i) {
+        const float voltage_v = record->cell_voltages_mv[i] / 1000.0f;
+        if (voltage_v < computed.min_voltage_v) {
+            computed.min_voltage_v = voltage_v;
+            computed.min_cell_number = i + 1;
+        }
+        if (voltage_v > computed.max_voltage_v) {
+            computed.max_voltage_v = voltage_v;
+            computed.max_cell_number = i + 1;
+        }
+    }
+    computed.delta_voltage_v = computed.max_voltage_v - computed.min_voltage_v;
+    *summary = computed;
+    return true;
+}
+
+uint32_t battery_record_cell_age_s(const BatteryRecord *record, int64_t now_us)
+{
+    if (record == nullptr || !record->cell_voltages_valid || record->cell_last_seen_us <= 0 ||
+        now_us <= record->cell_last_seen_us) {
+        return 0;
+    }
+
+    const int64_t age_s = (now_us - record->cell_last_seen_us) / 1000000LL;
+    return age_s > UINT32_MAX ? UINT32_MAX : static_cast<uint32_t>(age_s);
 }

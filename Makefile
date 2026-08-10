@@ -65,6 +65,8 @@ build:
 	$(IDF_PY) $(IDF_ARGS) -DPOWER4_BOARD= build
 
 test:
+	$(CXX) -std=c++17 -Wall -Wextra -Werror -Imain tests/test_jbd_protocol.cpp main/jbd_protocol.cpp -o /tmp/power4-test-jbd-protocol
+	/tmp/power4-test-jbd-protocol
 	python3 tests/validate_board_profiles.py
 	python3 tests/validate_policy_size.py
 	python3 tests/validate_timezone.py

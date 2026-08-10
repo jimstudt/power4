@@ -12,6 +12,7 @@ idf_component_register(
         "console.cpp"
         "ethernet_manager.cpp"
         "input_manager.cpp"
+        "jbd_protocol.cpp"
         "json_output.cpp"
         "log_buffer.cpp"
         "main.cpp"

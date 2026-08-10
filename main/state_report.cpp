@@ -8,7 +8,9 @@
 #include "battery_bank.hpp"
 #include "battery_store.hpp"
 #include "board_config.hpp"
+#include "esp_timer.h"
 #include "input_manager.hpp"
+#include "jbd_protocol.hpp"
 #include "relay_manager.hpp"
 #include "sdkconfig.h"
 
@@ -19,9 +21,9 @@ constexpr size_t kRelayBytesPerRelay = 224;
 constexpr size_t kInputBaseBytes = 96;
 constexpr size_t kInputBytesPerInput = 192;
 constexpr size_t kBatteryBaseBytes = 96;
-constexpr size_t kBatteryBytesPerBattery = 256;
+constexpr size_t kBatteryBytesPerBattery = 1024;
 constexpr size_t kBankBaseBytes = 96;
-constexpr size_t kBankBytesPerBank = 640;
+constexpr size_t kBankBytesPerBank = 896;
 
 bool append_json(char *buffer, size_t capacity, size_t *used, const char *format, ...)
 {
@@ -194,6 +196,7 @@ esp_err_t build_batteries(char **json, size_t *length)
     }
 
     size_t used = 0;
+    const int64_t now_us = esp_timer_get_time();
     bool ok = append_json(buffer,
                           capacity,
                           &used,
@@ -209,11 +212,19 @@ esp_err_t build_batteries(char **json, size_t *length)
                                &used,
                                ",\"voltage_v\":%.3f,\"current_a\":%.3f,"
                                "\"soc_percent\":%.1f,\"cycle_count\":%u,"
+                               "\"protection_status\":%u,"
+                               "\"cell_undervoltage_protection\":%s,"
+                               "\"reported_cell_count\":%u,"
                                "\"temperature_c\":",
                                static_cast<double>(records[i].voltage_v),
                                static_cast<double>(records[i].current_a),
                                static_cast<double>(records[i].soc_percent),
-                               records[i].cycle_count);
+                               records[i].cycle_count,
+                               records[i].protection_status,
+                               (records[i].protection_status & kJbdProtectionCellUndervoltage) != 0
+                                   ? "true"
+                                   : "false",
+                               records[i].reported_cell_count);
         if (ok && records[i].temperature_valid) {
             ok = append_json(buffer,
                              capacity,
@@ -222,6 +233,44 @@ esp_err_t build_batteries(char **json, size_t *length)
                              static_cast<double>(records[i].temperature_c));
         } else if (ok) {
             ok = append_json(buffer, capacity, &used, "null");
+        }
+        BatteryCellSummary cells = {};
+        const bool cells_valid = battery_record_cell_summary(&records[i], &cells);
+        ok = ok && append_json(buffer, capacity, &used, ",\"cell_voltages_v\":");
+        if (ok && cells_valid) {
+            ok = append_json(buffer, capacity, &used, "[");
+            for (uint8_t cell = 0; ok && cell < records[i].cell_voltage_count; ++cell) {
+                ok = append_json(buffer,
+                                 capacity,
+                                 &used,
+                                 "%s%.3f",
+                                 cell == 0 ? "" : ",",
+                                 records[i].cell_voltages_mv[cell] / 1000.0);
+            }
+            ok = ok && append_json(buffer,
+                                   capacity,
+                                   &used,
+                                   "],\"min_cell_voltage_v\":%.3f,"
+                                   "\"max_cell_voltage_v\":%.3f,"
+                                   "\"cell_delta_voltage_v\":%.3f,"
+                                   "\"min_cell_number\":%u,\"max_cell_number\":%u,"
+                                   "\"cell_last_seen_us\":%" PRId64 ",\"cell_age_s\":%" PRIu32,
+                                   static_cast<double>(cells.min_voltage_v),
+                                   static_cast<double>(cells.max_voltage_v),
+                                   static_cast<double>(cells.delta_voltage_v),
+                                   cells.min_cell_number,
+                                   cells.max_cell_number,
+                                   records[i].cell_last_seen_us,
+                                   battery_record_cell_age_s(&records[i], now_us));
+        } else if (ok) {
+            ok = append_json(buffer,
+                             capacity,
+                             &used,
+                             "null,\"min_cell_voltage_v\":null,"
+                             "\"max_cell_voltage_v\":null,"
+                             "\"cell_delta_voltage_v\":null,"
+                             "\"min_cell_number\":null,\"max_cell_number\":null,"
+                             "\"cell_last_seen_us\":null,\"cell_age_s\":null");
         }
         ok = ok && append_json(buffer,
                                capacity,
@@ -298,6 +347,52 @@ esp_err_t build_banks(char **json, size_t *length)
                                           capacity,
                                           &used,
                                           esp_err_to_name(state_err));
+        }
+        ok = ok && append_json(buffer, capacity, &used, ",\"protection_status\":");
+        if (ok && state_err == ESP_OK && state.ready) {
+            ok = append_json(buffer,
+                             capacity,
+                             &used,
+                             "%u",
+                             static_cast<unsigned>(state.protection_status));
+        } else if (ok) {
+            ok = append_json(buffer, capacity, &used, "null");
+        }
+        ok = ok && append_json(buffer, capacity, &used, ",\"cell_undervoltage_protection\":");
+        if (ok && state_err == ESP_OK && state.ready) {
+            ok = append_json(buffer,
+                             capacity,
+                             &used,
+                             "%s",
+                             state.cell_undervoltage_protection ? "true" : "false");
+        } else if (ok) {
+            ok = append_json(buffer, capacity, &used, "null");
+        }
+        ok = ok && append_json(buffer,
+                               capacity,
+                               &used,
+                               ",\"cell_data_ready\":%s,\"min_cell_voltage_v\":",
+                               state_err == ESP_OK && state.ready && state.cell_data_ready ? "true"
+                                                                                         : "false");
+        if (ok && state_err == ESP_OK && state.ready && state.cell_data_ready) {
+            ok = append_json(buffer,
+                             capacity,
+                             &used,
+                             "%.3f,\"min_cell_battery\":",
+                             static_cast<double>(state.min_cell_voltage_v));
+            ok = ok && append_json_string(buffer, capacity, &used, state.min_cell_battery);
+            ok = ok && append_json(buffer,
+                                   capacity,
+                                   &used,
+                                   ",\"min_cell_number\":%u,\"cell_age_s\":%" PRIu32,
+                                   state.min_cell_number,
+                                   state.cell_age_s);
+        } else if (ok) {
+            ok = append_json(buffer,
+                             capacity,
+                             &used,
+                             "null,\"min_cell_battery\":null,"
+                             "\"min_cell_number\":null,\"cell_age_s\":null");
         }
         ok = ok && append_json(buffer, capacity, &used, "}");
     }

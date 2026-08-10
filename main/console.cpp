@@ -17,6 +17,7 @@
 #include "config_flags.hpp"
 #include "ethernet_manager.hpp"
 #include "input_manager.hpp"
+#include "jbd_protocol.hpp"
 #include "json_output.hpp"
 #include "log_buffer.hpp"
 #include "policy_storage.hpp"
@@ -460,6 +461,7 @@ void print_show_usage(void)
     printf("  show banks\n");
     printf("  show ble\n");
     printf("  show board\n");
+    printf("  show cells [battery]\n");
     printf("  show debug\n");
     printf("  show ethernet\n");
     printf("  show inputs\n");
@@ -473,6 +475,29 @@ void print_show_usage(void)
     printf("  show time\n");
     printf("  show timezone\n");
     printf("  show timezones\n");
+}
+
+void print_jbd_protection_descriptions(uint16_t protection_status)
+{
+    printf("%-31s protections: ", "");
+    bool first = true;
+    for (uint8_t bit = 0; bit < 16; ++bit) {
+        if ((protection_status & (1U << bit)) == 0) {
+            continue;
+        }
+
+        if (!first) {
+            printf(", ");
+        }
+        const char *description = jbd_protection_description(bit);
+        if (description != nullptr) {
+            printf("%s", description);
+        } else {
+            printf("unknown bit %u", bit);
+        }
+        first = false;
+    }
+    printf("\n");
 }
 
 int show_batteries_command(void)
@@ -502,13 +527,14 @@ int show_batteries_command(void)
     }
 
     const int64_t now_us = esp_timer_get_time();
-    printf("%-31s %9s %9s %7s %7s %6s %10s\n",
+    printf("%-31s %9s %9s %7s %7s %6s %10s %10s\n",
            "name",
            "voltage",
            "current",
            "soc",
            "temp",
            "cycles",
+           "protection",
            "age_s");
     for (size_t i = 0; i < count; ++i) {
         uint32_t age_s = 0;
@@ -517,27 +543,170 @@ int show_batteries_command(void)
         }
 
         if (records[i].temperature_valid) {
-            printf("%-31s %8.3fV %8.3fA %6.1f%% %6.1fC %6u %10" PRIu32 "\n",
+            printf("%-31s %8.3fV %8.3fA %6.1f%% %6.1fC %6u     0x%04x %10" PRIu32 "\n",
                    records[i].name,
                    static_cast<double>(records[i].voltage_v),
                    static_cast<double>(records[i].current_a),
                    static_cast<double>(records[i].soc_percent),
                    static_cast<double>(records[i].temperature_c),
                    records[i].cycle_count,
+                   records[i].protection_status,
                    age_s);
         } else {
-            printf("%-31s %8.3fV %8.3fA %6.1f%% %7s %6u %10" PRIu32 "\n",
+            printf("%-31s %8.3fV %8.3fA %6.1f%% %7s %6u     0x%04x %10" PRIu32 "\n",
                    records[i].name,
                    static_cast<double>(records[i].voltage_v),
                    static_cast<double>(records[i].current_a),
                    static_cast<double>(records[i].soc_percent),
                    "-",
                    records[i].cycle_count,
+                   records[i].protection_status,
                    age_s);
+        }
+        if (records[i].protection_status != 0) {
+            print_jbd_protection_descriptions(records[i].protection_status);
         }
     }
 
     free(records);
+    return 0;
+}
+
+const BatteryRecord *find_battery_record(const BatteryRecord *records,
+                                         size_t count,
+                                         const char *name)
+{
+    for (size_t i = 0; i < count; ++i) {
+        if (strcmp(records[i].name, name) == 0) {
+            return &records[i];
+        }
+    }
+    return nullptr;
+}
+
+void print_battery_cells(const BatteryRecord &record, int64_t now_us, const char *indent)
+{
+    BatteryCellSummary cells = {};
+    if (!battery_record_cell_summary(&record, &cells)) {
+        printf("%sbattery %s: current=%.3fA reported_cells=%u cells=unavailable\n",
+               indent,
+               record.name,
+               static_cast<double>(record.current_a),
+               record.reported_cell_count);
+        return;
+    }
+
+    printf("%sbattery %s: current=%.3fA cells=%u age_s=%" PRIu32
+           " min=%.3fV(cell %u) max=%.3fV(cell %u) delta=%.3fV\n",
+           indent,
+           record.name,
+           static_cast<double>(record.current_a),
+           record.cell_voltage_count,
+           battery_record_cell_age_s(&record, now_us),
+           static_cast<double>(cells.min_voltage_v),
+           cells.min_cell_number,
+           static_cast<double>(cells.max_voltage_v),
+           cells.max_cell_number,
+           static_cast<double>(cells.delta_voltage_v));
+    for (uint8_t cell = 0; cell < record.cell_voltage_count; ++cell) {
+        const uint8_t cell_number = cell + 1;
+        const char *marker = "";
+        if (cell_number == cells.min_cell_number) {
+            marker = " weak";
+        } else if (cell_number == cells.max_cell_number) {
+            marker = " strong";
+        }
+        printf("%s  cell %2u: %.3fV%s\n",
+               indent,
+               cell_number,
+               record.cell_voltages_mv[cell] / 1000.0,
+               marker);
+    }
+}
+
+int show_cells_command(const char *battery_name)
+{
+    const int64_t now_us = esp_timer_get_time();
+    if (battery_name != nullptr) {
+        if (!battery_store_valid_name(battery_name)) {
+            printf("show cells failed: invalid battery name\n");
+            return 1;
+        }
+
+        BatteryRecord record = {};
+        const esp_err_t err = battery_store_get(battery_name, &record);
+        if (err == ESP_ERR_NOT_FOUND) {
+            printf("show cells failed: battery '%s' not observed\n", battery_name);
+            return 1;
+        }
+        if (err != ESP_OK) {
+            printf("show cells failed: %s\n", esp_err_to_name(err));
+            return 1;
+        }
+        print_battery_cells(record, now_us, "");
+        return 0;
+    }
+
+    BatteryBankList *banks = static_cast<BatteryBankList *>(malloc(sizeof(BatteryBankList)));
+    BatteryRecord *records =
+        static_cast<BatteryRecord *>(calloc(CONFIG_POWER4_MAX_BATTERIES, sizeof(BatteryRecord)));
+    if (banks == nullptr || records == nullptr) {
+        printf("show cells failed: out of memory\n");
+        free(records);
+        free(banks);
+        return 1;
+    }
+
+    esp_err_t err = battery_bank_list(banks);
+    if (err != ESP_OK) {
+        printf("show cells failed: %s\n", esp_err_to_name(err));
+        free(records);
+        free(banks);
+        return 1;
+    }
+
+    size_t record_count = 0;
+    err = battery_store_snapshot(records, CONFIG_POWER4_MAX_BATTERIES, &record_count);
+    if (err != ESP_OK) {
+        printf("show cells failed: %s\n", esp_err_to_name(err));
+        free(records);
+        free(banks);
+        return 1;
+    }
+
+    bool record_is_banked[CONFIG_POWER4_MAX_BATTERIES] = {};
+    for (size_t i = 0; i < banks->count; ++i) {
+        const BatteryBankDefinition &bank = banks->banks[i];
+        printf("bank %s:\n", bank.name);
+        for (size_t j = 0; j < bank.battery_count; ++j) {
+            const BatteryRecord *record =
+                find_battery_record(records, record_count, bank.batteries[j]);
+            if (record == nullptr) {
+                printf("  battery %s: not observed\n", bank.batteries[j]);
+                continue;
+            }
+            record_is_banked[record - records] = true;
+            print_battery_cells(*record, now_us, "  ");
+        }
+    }
+
+    bool printed_unbanked = false;
+    for (size_t i = 0; i < record_count; ++i) {
+        if (record_is_banked[i]) {
+            continue;
+        }
+        if (!printed_unbanked) {
+            printf("unbanked:\n");
+            printed_unbanked = true;
+        }
+        print_battery_cells(records[i], now_us, "  ");
+    }
+    if (banks->count == 0 && record_count == 0) {
+        printf("cells: no batteries observed\n");
+    }
+
+    free(records);
+    free(banks);
     return 0;
 }
 
@@ -851,6 +1020,14 @@ int show_command(int argc, char **argv)
         return show_board_command();
     }
 
+    if (strcmp(argv[1], "cells") == 0) {
+        if (argc < 2 || argc > 3) {
+            print_show_usage();
+            return 1;
+        }
+        return show_cells_command(argc == 3 ? argv[2] : nullptr);
+    }
+
     if (strcmp(argv[1], "debug") == 0) {
         if (argc != 2) {
             print_show_usage();
@@ -1115,10 +1292,11 @@ int bank_show_command(void)
         } else if (!state.ready) {
             printf(" state=not-ready\n");
         } else {
-            printf(" voltage=%.3fV current=%.3fA soc=%.1f%%\n",
+            printf(" voltage=%.3fV current=%.3fA soc=%.1f%% protection=0x%04x\n",
                    static_cast<double>(state.voltage_v),
                    static_cast<double>(state.current_a),
-                   static_cast<double>(state.soc_percent));
+                   static_cast<double>(state.soc_percent),
+                   state.protection_status);
         }
     }
 
@@ -2339,6 +2517,7 @@ int power4_help_command(int argc, char **argv)
     printf("  show banks                  list configured battery banks\n");
     printf("  show ble                    list BLE GAP procedure and connection state\n");
     printf("  show board                  show the selected hardware profile\n");
+    printf("  show cells [battery]        list cell voltages by bank or for one battery\n");
     printf("  show debug                  show volatile debug settings\n");
     printf("  show ethernet               show Ethernet settings and link state\n");
     printf("  show inputs                 list digital input state\n");

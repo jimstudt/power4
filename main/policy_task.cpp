@@ -366,16 +366,24 @@ int lua_battery_bank_state(lua_State *state)
 
     lua_pushboolean(state, bank_state.ready);
     if (!bank_state.ready) {
-        lua_pushnil(state);
-        lua_pushnil(state);
-        lua_pushnil(state);
-        return 4;
+        for (int i = 0; i < 6; ++i) {
+            lua_pushnil(state);
+        }
+        return 7;
     }
 
     lua_pushnumber(state, bank_state.voltage_v);
     lua_pushnumber(state, bank_state.current_a);
     lua_pushnumber(state, bank_state.soc_percent);
-    return 4;
+    if (bank_state.cell_data_ready) {
+        lua_pushnumber(state, bank_state.min_cell_voltage_v);
+        lua_pushinteger(state, static_cast<lua_Integer>(bank_state.cell_age_s));
+    } else {
+        lua_pushnil(state);
+        lua_pushnil(state);
+    }
+    lua_pushboolean(state, bank_state.cell_undervoltage_protection);
+    return 7;
 }
 
 int lua_battery_bank_names(lua_State *state)

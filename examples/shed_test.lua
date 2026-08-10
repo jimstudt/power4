@@ -17,9 +17,10 @@ end
 function battery_bank_state(name)
     local b = banks[name]
     if b == nil or b.soc == nil then
-        return false, nil, nil, nil
+        return false, nil, nil, nil, nil, nil, nil
     end
-    return true, b.v or 50.0, b.a or 1.0, b.soc
+    return true, b.v or 50.0, b.a or 1.0, b.soc,
+           b.min_cell, b.cell_age, b.cell_uv == true
 end
 
 function relay_state(n)
@@ -63,6 +64,21 @@ function config_bool(name, default)
 end
 
 function syslog(...) end
+
+do
+    reset({ banks = {} })
+    assert(select("#", battery_bank_state("missing")) == 7)
+    local ready, volts, amps, soc, min_cell, cell_age, cell_uv =
+        battery_bank_state("missing")
+    assert(ready == false and volts == nil and amps == nil and soc == nil)
+    assert(min_cell == nil and cell_age == nil and cell_uv == nil)
+
+    reset({ banks = { test = { soc = 55, min_cell = 3.2, cell_age = 4, cell_uv = true } } })
+    assert(select("#", battery_bank_state("test")) == 7)
+    ready, volts, amps, soc, min_cell, cell_age, cell_uv = battery_bank_state("test")
+    assert(ready == true and volts == 50.0 and amps == 1.0 and soc == 55)
+    assert(min_cell == 3.2 and cell_age == 4 and cell_uv == true)
+end
 
 local failures = 0
 local function scenario(label, env, expected)
@@ -129,6 +145,76 @@ scenario("48v above 60, generator on stops",
     { banks = { ["48v"] = { soc = 65 }, ["24v-a"] = { soc = 90 }, ["24v-b"] = { soc = 90 } },
       relays = { [3] = true } },
     "off(3)")
+
+scenario("weak 24v cell starts dcdc despite high soc",
+    { banks = { ["48v"] = { soc = 80, min_cell = 3.30, cell_age = 0 },
+                ["24v-a"] = { soc = 90, min_cell = 3.09, cell_age = 0 },
+                ["24v-b"] = { soc = 90, min_cell = 3.30, cell_age = 0 } } },
+    "on(2,300)")
+
+scenario("24v undervoltage alarm starts dcdc",
+    { banks = { ["48v"] = { soc = 80 }, ["24v-a"] = { soc = 90, cell_uv = true },
+                ["24v-b"] = { soc = 90 } } },
+    "on(2,300)")
+
+scenario("24v alarm holds dcdc through soc recovery",
+    { banks = { ["48v"] = { soc = 80 }, ["24v-a"] = { soc = 90, cell_uv = true },
+                ["24v-b"] = { soc = 90 } },
+      relays = { [2] = true } },
+    "on(2,300)")
+
+scenario("cleared 24v alarm and recovered cell releases dcdc",
+    { banks = { ["48v"] = { soc = 80 },
+                ["24v-a"] = { soc = 90, min_cell = 3.25, cell_age = 0 },
+                ["24v-b"] = { soc = 90, min_cell = 3.30, cell_age = 0 } },
+      relays = { [2] = true } },
+    "off(2)")
+
+scenario("24v cell recovery holds running dcdc",
+    { banks = { ["48v"] = { soc = 80 },
+                ["24v-a"] = { soc = 90, min_cell = 3.20, cell_age = 0 },
+                ["24v-b"] = { soc = 90, min_cell = 3.30, cell_age = 0 } },
+      relays = { [2] = true } },
+    "on(2,300)")
+
+scenario("stale weak 24v cell falls back to soc",
+    { banks = { ["48v"] = { soc = 80 },
+                ["24v-a"] = { soc = 90, min_cell = 3.00, cell_age = 901 },
+                ["24v-b"] = { soc = 90 } } },
+    "")
+
+scenario("48v undervoltage blocks dcdc and starts generator",
+    { banks = { ["48v"] = { soc = 80, cell_uv = true },
+                ["24v-a"] = { soc = 40 }, ["24v-b"] = { soc = 40 } } },
+    "on(3,300)")
+
+scenario("48v alarm holds generator through soc recovery",
+    { banks = { ["48v"] = { soc = 80, cell_uv = true },
+                ["24v-a"] = { soc = 90 }, ["24v-b"] = { soc = 90 } },
+      relays = { [3] = true } },
+    "on(3,300)")
+
+scenario("cleared 48v alarm and recovered cell releases generator",
+    { banks = { ["48v"] = { soc = 80, min_cell = 3.25, cell_age = 0 },
+                ["24v-a"] = { soc = 90 }, ["24v-b"] = { soc = 90 } },
+      relays = { [3] = true } },
+    "off(3)")
+
+scenario("weak 48v cell starts generator despite high soc",
+    { banks = { ["48v"] = { soc = 80, min_cell = 3.10, cell_age = 0 },
+                ["24v-a"] = { soc = 90 }, ["24v-b"] = { soc = 90 } } },
+    "on(3,300)")
+
+scenario("48v cell recovery holds running generator",
+    { banks = { ["48v"] = { soc = 80, min_cell = 3.20, cell_age = 0 },
+                ["24v-a"] = { soc = 90 }, ["24v-b"] = { soc = 90 } },
+      relays = { [3] = true } },
+    "on(3,300)")
+
+scenario("stale weak 48v cell falls back to soc",
+    { banks = { ["48v"] = { soc = 80, min_cell = 3.00, cell_age = 901 },
+                ["24v-a"] = { soc = 90 }, ["24v-b"] = { soc = 90 } } },
+    "")
 
 scenario("48v low but generator not allowed",
     { banks = { ["48v"] = { soc = 25 }, ["24v-a"] = { soc = 90 }, ["24v-b"] = { soc = 90 } },

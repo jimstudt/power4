@@ -4,6 +4,8 @@
 #include <string.h>
 
 #include "esp_log.h"
+#include "esp_timer.h"
+#include "jbd_protocol.hpp"
 #include "nvs_flash.h"
 
 namespace {
@@ -315,12 +317,11 @@ esp_err_t battery_bank_get_state(const char *name, BatteryBankState *state)
     }
 
     const StoredBatteryBank &bank = banks->banks[index];
-    BatteryBankState computed = {
-        .ready = true,
-        .voltage_v = 0.0f,
-        .current_a = 0.0f,
-        .soc_percent = 100.0f,
-    };
+    BatteryBankState computed = {};
+    computed.ready = true;
+    computed.soc_percent = 100.0f;
+    computed.cell_data_ready = true;
+    const int64_t now_us = esp_timer_get_time();
 
     for (size_t i = 0; i < bank.battery_count; ++i) {
         BatteryRecord record = {};
@@ -342,7 +343,35 @@ esp_err_t battery_bank_get_state(const char *name, BatteryBankState *state)
         if (record.soc_percent < computed.soc_percent) {
             computed.soc_percent = record.soc_percent;
         }
+        computed.protection_status |= record.protection_status;
+
+        BatteryCellSummary cells = {};
+        if (!battery_record_cell_summary(&record, &cells)) {
+            computed.cell_data_ready = false;
+            continue;
+        }
+
+        const uint32_t cell_age_s = battery_record_cell_age_s(&record, now_us);
+        if (cell_age_s > computed.cell_age_s) {
+            computed.cell_age_s = cell_age_s;
+        }
+        if (computed.min_cell_number == 0 || cells.min_voltage_v < computed.min_cell_voltage_v) {
+            computed.min_cell_voltage_v = cells.min_voltage_v;
+            computed.min_cell_number = cells.min_cell_number;
+            strlcpy(computed.min_cell_battery,
+                    record.name,
+                    sizeof(computed.min_cell_battery));
+        }
     }
+
+    if (!computed.cell_data_ready) {
+        computed.min_cell_voltage_v = 0.0f;
+        computed.cell_age_s = 0;
+        computed.min_cell_battery[0] = '\0';
+        computed.min_cell_number = 0;
+    }
+    computed.cell_undervoltage_protection =
+        (computed.protection_status & kJbdProtectionCellUndervoltage) != 0;
 
     *state = computed;
     free(banks);

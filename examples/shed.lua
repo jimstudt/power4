@@ -26,6 +26,9 @@
 --   dcdc_source_min 20  never drain the 48v bank below this
 --   gen_start       30  start the generator below this
 --   gen_stop        60  stop the generator above this
+--   cell_low       3.10 treat any fresh cell at or below this as low (volts)
+--   cell_recover   3.25 clear a cell-voltage hold at or above this (volts)
+--   cell_max_age    900 ignore cell voltages older than this (seconds)
 --
 -- The policy runs once a minute. Relays are held on a deadman timer and
 -- refreshed each cycle; if this policy stops running, everything except an
@@ -52,9 +55,42 @@ local DCDC_SOURCE_MIN_SOC = config_number("dcdc_source_min", 20)
 local GENERATOR_START_SOC = config_number("gen_start", 30)
 local GENERATOR_STOP_SOC = config_number("gen_stop", 60)
 
-local ready48, _, _, soc48 = battery_bank_state("48v")
-local ready24a, _, _, soc24a = battery_bank_state("24v-a")
-local ready24b, _, _, soc24b = battery_bank_state("24v-b")
+local CELL_LOW_V = config_number("cell_low", 3.10)
+local CELL_RECOVER_V = config_number("cell_recover", 3.25)
+local CELL_MAX_AGE_S = config_number("cell_max_age", 900)
+if CELL_LOW_V <= 0 or CELL_RECOVER_V <= CELL_LOW_V or CELL_MAX_AGE_S < 0 then
+    error("cell thresholds require 0 < cell_low < cell_recover and cell_max_age >= 0")
+end
+
+local ready48, _, _, soc48, min48, cell_age48, cell_uv48 = battery_bank_state("48v")
+local ready24a, _, _, soc24a, min24a, cell_age24a, cell_uv24a =
+    battery_bank_state("24v-a")
+local ready24b, _, _, soc24b, min24b, cell_age24b, cell_uv24b =
+    battery_bank_state("24v-b")
+
+local function cell_voltage_fresh(voltage, age)
+    return voltage ~= nil and age ~= nil and age <= CELL_MAX_AGE_S
+end
+
+local function cell_low_reason(voltage, age, undervoltage)
+    if undervoltage == true then
+        return "JBD protection alarm"
+    end
+    if cell_voltage_fresh(voltage, age) and voltage <= CELL_LOW_V then
+        return "measured voltage"
+    end
+    return nil
+end
+
+local function cell_recovery_reason(voltage, age, undervoltage)
+    if undervoltage == true then
+        return "JBD protection alarm"
+    end
+    if cell_voltage_fresh(voltage, age) and voltage < CELL_RECOVER_V then
+        return "measured voltage"
+    end
+    return nil
+end
 
 local soc24 = nil
 if ready24a and ready24b then
@@ -85,14 +121,33 @@ end
 local dcdc_on = relay_state(DCDC_RELAY)
 local want_dcdc = nil
 if soc24 ~= nil and ready48 then
+    local cell24a_low_reason = cell_low_reason(min24a, cell_age24a, cell_uv24a)
+    local cell24b_low_reason = cell_low_reason(min24b, cell_age24b, cell_uv24b)
+    local cell24_low = cell24a_low_reason ~= nil or cell24b_low_reason ~= nil
+    local cell24a_recovery_reason = cell_recovery_reason(min24a, cell_age24a, cell_uv24a)
+    local cell24b_recovery_reason = cell_recovery_reason(min24b, cell_age24b, cell_uv24b)
+    local cell24_recovering = cell24a_recovery_reason ~= nil
+        or cell24b_recovery_reason ~= nil
     want_dcdc = false
-    if soc24 < DCDC_START_SOC then
+    if soc24 < DCDC_START_SOC or cell24_low then
         want_dcdc = true
-    elseif dcdc_on and soc24 < DCDC_STOP_SOC then
+        if cell24_low then
+            syslog("dcdc: 24v cell low; 24v-a source",
+                   cell24a_low_reason or "none", "24v-b source",
+                   cell24b_low_reason or "none", "min cells", min24a, min24b)
+        end
+    elseif dcdc_on and (soc24 < DCDC_STOP_SOC or cell24_recovering) then
         want_dcdc = true
+        if cell24_recovering then
+            syslog("dcdc: waiting for 24v cell recovery; 24v-a source",
+                   cell24a_recovery_reason or "none", "24v-b source",
+                   cell24b_recovery_reason or "none", "min cells", min24a, min24b)
+        end
     end
-    if want_dcdc and soc48 < DCDC_SOURCE_MIN_SOC then
-        syslog("dcdc: 48v bank at", soc48, "% is below source minimum, not moving energy")
+    local source_cell_low_reason = cell_low_reason(min48, cell_age48, cell_uv48)
+    if want_dcdc and (soc48 < DCDC_SOURCE_MIN_SOC or source_cell_low_reason ~= nil) then
+        syslog("dcdc: 48v source low, not moving energy; soc", soc48,
+               "cell source", source_cell_low_reason or "SOC", "min_cell", min48)
         want_dcdc = false
     end
 else
@@ -113,11 +168,21 @@ end
 local generator_on = relay_state(GENERATOR_RELAY)
 local want_generator = nil
 if ready48 then
+    local cell48_low_reason = cell_low_reason(min48, cell_age48, cell_uv48)
+    local cell48_recovery_reason = cell_recovery_reason(min48, cell_age48, cell_uv48)
     want_generator = false
-    if soc48 < GENERATOR_START_SOC then
+    if soc48 < GENERATOR_START_SOC or cell48_low_reason ~= nil then
         want_generator = true
-    elseif generator_on and soc48 < GENERATOR_STOP_SOC then
+        if cell48_low_reason ~= nil then
+            syslog("generator: 48v cell low; min_cell", min48,
+                   "source", cell48_low_reason)
+        end
+    elseif generator_on and (soc48 < GENERATOR_STOP_SOC or cell48_recovery_reason ~= nil) then
         want_generator = true
+        if cell48_recovery_reason ~= nil then
+            syslog("generator: waiting for 48v cell recovery; min_cell", min48,
+                   "source", cell48_recovery_reason)
+        end
     end
 else
     syslog("generator: 48v bank not ready, no automatic control")
