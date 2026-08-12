@@ -759,7 +759,10 @@ lua examples/house_test.lua examples/house.lua
 `examples/shed.lua` is a complete site policy managing a 48v bank charged by
 a generator and a pair of paralleled 24v banks fed from the 48v bank through
 a DC/DC converter, with hysteresis, deadman holds, manual override flags,
-and tunable thresholds read from policy parameters. Relay 4 powers the camera
+and tunable thresholds read from policy parameters. Because the converter
+normally charges each 24v bank at about 8A, the policy turns it off when either
+24v bank reports more than the configurable `dcdc_ext_amps` threshold (10A by
+default), indicating that generator or solar charging is available. Relay 4 powers the camera
 PoE switch when the `enableCameras` policy boolean is true. Relay 1 keeps the
 service Raspberry Pi powered unless the `deepSleep` policy boolean is true.
 `examples/shed_test.lua` runs it against scripted scenarios on a host with a

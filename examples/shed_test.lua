@@ -123,6 +123,23 @@ scenario("24v in dead band, dcdc on keeps running",
       relays = { [2] = true } },
     "on(2,300)")
 
+scenario("10A 24v charge does not defeat hysteresis",
+    { banks = { ["48v"] = { soc = 80 }, ["24v-a"] = { soc = 60, a = 10 },
+                ["24v-b"] = { soc = 60, a = 10 } },
+      relays = { [2] = true } },
+    "on(2,300)")
+
+scenario("external 24v charge defeats dcdc hysteresis",
+    { banks = { ["48v"] = { soc = 80 }, ["24v-a"] = { soc = 60, a = 10.1 },
+                ["24v-b"] = { soc = 60, a = 8 } },
+      relays = { [2] = true } },
+    "off(2)")
+
+scenario("external 24v charge suppresses low-soc dcdc start",
+    { banks = { ["48v"] = { soc = 80 }, ["24v-a"] = { soc = 40, a = 12 },
+                ["24v-b"] = { soc = 40, a = 8 } } },
+    "")
+
 scenario("24v above 70, dcdc on stops",
     { banks = { ["48v"] = { soc = 80 }, ["24v-a"] = { soc = 75 }, ["24v-b"] = { soc = 75 } },
       relays = { [2] = true } },
@@ -176,6 +193,13 @@ scenario("24v cell recovery holds running dcdc",
                 ["24v-b"] = { soc = 90, min_cell = 3.30, cell_age = 0 } },
       relays = { [2] = true } },
     "on(2,300)")
+
+scenario("external charge overrides 24v cell recovery hold",
+    { banks = { ["48v"] = { soc = 80 },
+                ["24v-a"] = { soc = 90, a = 11, min_cell = 3.20, cell_age = 0 },
+                ["24v-b"] = { soc = 90, a = 8, min_cell = 3.30, cell_age = 0 } },
+      relays = { [2] = true } },
+    "off(2)")
 
 scenario("stale weak 24v cell falls back to soc",
     { banks = { ["48v"] = { soc = 80 },
@@ -257,6 +281,19 @@ scenario("dcdc_source_min raised by parameter blocks transfer",
     { banks = { ["48v"] = { soc = 25 }, ["24v-a"] = { soc = 40 }, ["24v-b"] = { soc = 40 } },
       numbers = { dcdc_source_min = 30, gen_start = 20 } },
     "")
+
+scenario("external charge threshold is configurable",
+    { banks = { ["48v"] = { soc = 80 }, ["24v-a"] = { soc = 60, a = 11 },
+                ["24v-b"] = { soc = 60, a = 8 } },
+      relays = { [2] = true },
+      numbers = { dcdc_ext_amps = 12 } },
+    "on(2,300)")
+
+scenario("manual dcdc force overrides external charge",
+    { banks = { ["48v"] = { soc = 80 }, ["24v-a"] = { soc = 90, a = 12 },
+                ["24v-b"] = { soc = 90, a = 8 } },
+      flags = { force_48v_24v = true } },
+    "on(2,300)")
 
 scenario("raspberry pi is held on by default",
     { banks = full },

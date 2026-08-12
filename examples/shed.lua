@@ -24,6 +24,7 @@
 --   dcdc_start      50  start moving energy into the 24v banks below this
 --   dcdc_stop       70  stop moving energy above this
 --   dcdc_source_min 20  never drain the 48v bank below this
+--   dcdc_ext_amps   10  external 24v charging above this disables DC/DC
 --   gen_start       30  start the generator below this
 --   gen_stop        60  stop the generator above this
 --   cell_low       3.10 treat any fresh cell at or below this as low (volts)
@@ -50,6 +51,10 @@ local PI_HOLD_SECONDS = 3600  -- 60 minute deadman for the raspberry pi
 local DCDC_START_SOC = config_number("dcdc_start", 50)
 local DCDC_STOP_SOC = config_number("dcdc_stop", 70)
 local DCDC_SOURCE_MIN_SOC = config_number("dcdc_source_min", 20)
+local DCDC_EXTERNAL_CHARGE_A = config_number("dcdc_ext_amps", 10)
+if DCDC_EXTERNAL_CHARGE_A < 0 then
+    error("dcdc_ext_amps must be at least zero")
+end
 
 -- 48v bank generator hysteresis
 local GENERATOR_START_SOC = config_number("gen_start", 30)
@@ -63,9 +68,9 @@ if CELL_LOW_V <= 0 or CELL_RECOVER_V <= CELL_LOW_V or CELL_MAX_AGE_S < 0 then
 end
 
 local ready48, _, _, soc48, min48, cell_age48, cell_uv48 = battery_bank_state("48v")
-local ready24a, _, _, soc24a, min24a, cell_age24a, cell_uv24a =
+local ready24a, _, amps24a, soc24a, min24a, cell_age24a, cell_uv24a =
     battery_bank_state("24v-a")
-local ready24b, _, _, soc24b, min24b, cell_age24b, cell_uv24b =
+local ready24b, _, amps24b, soc24b, min24b, cell_age24b, cell_uv24b =
     battery_bank_state("24v-b")
 
 local function cell_voltage_fresh(voltage, age)
@@ -121,6 +126,12 @@ end
 local dcdc_on = relay_state(DCDC_RELAY)
 local want_dcdc = nil
 if soc24 ~= nil and ready48 then
+    -- The DC/DC converter normally contributes about 8A to each 24v bank.
+    -- More than this threshold means another source (generator or solar) is
+    -- charging the 24v side, so it should take over even while hysteresis or
+    -- cell recovery would otherwise keep the converter running.
+    local external_24v_charging = amps24a > DCDC_EXTERNAL_CHARGE_A
+        or amps24b > DCDC_EXTERNAL_CHARGE_A
     local cell24a_low_reason = cell_low_reason(min24a, cell_age24a, cell_uv24a)
     local cell24b_low_reason = cell_low_reason(min24b, cell_age24b, cell_uv24b)
     local cell24_low = cell24a_low_reason ~= nil or cell24b_low_reason ~= nil
@@ -148,6 +159,13 @@ if soc24 ~= nil and ready48 then
     if want_dcdc and (soc48 < DCDC_SOURCE_MIN_SOC or source_cell_low_reason ~= nil) then
         syslog("dcdc: 48v source low, not moving energy; soc", soc48,
                "cell source", source_cell_low_reason or "SOC", "min_cell", min48)
+        want_dcdc = false
+    end
+    if external_24v_charging then
+        if want_dcdc or dcdc_on then
+            syslog("dcdc: external 24v charging detected, not moving energy; currents",
+                   amps24a, amps24b, "threshold", DCDC_EXTERNAL_CHARGE_A)
+        end
         want_dcdc = false
     end
 else
