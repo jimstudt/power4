@@ -6,3 +6,8 @@
   down their executables?
 - The house example exposes a fatal problem if policy can't run.  We
   need some sort of fallback, ideally respecting switches.
+- The batteries can get stuck at the bluetooth level and need a reboot
+  to clear.
+- power4ctl should do DNS lookup on address and validate the IP, right
+  now it fails at the first command issued in interative mode.
+  
