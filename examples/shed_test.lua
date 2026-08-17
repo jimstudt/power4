@@ -311,12 +311,20 @@ scenario("enableCameras powers the PoE switch",
     { banks = full, flags = { enableCameras = true } },
     "on(4,300)")
 
-scenario("cameras disabled turns off a running PoE switch",
+scenario("occupied powers the PoE access point",
+    { banks = full, flags = { occupied = true } },
+    "on(4,300)")
+
+scenario("camera and occupancy requests share the PoE relay",
+    { banks = full, flags = { enableCameras = true, occupied = true } },
+    "on(4,300)")
+
+scenario("no camera or occupancy request turns off running PoE",
     { banks = full, relays = { [4] = true } },
     "off(4)")
 
-scenario("explicit enableCameras=false leaves PoE off",
-    { banks = full, flags = { enableCameras = false } },
+scenario("explicit false camera and occupancy leave PoE off",
+    { banks = full, flags = { enableCameras = false, occupied = false } },
     "")
 
 scenario("force_48v_24v runs dcdc regardless of soc",

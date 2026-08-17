@@ -1,14 +1,16 @@
 -- House power policy.
--- Relays: 1 ethernet, 2 adminComputer, 3 internet, 4 poweredEthernet,
--- 5 porchCamera. Relays 6-8 are used only by the DI2 override.
+-- Relays: 1 ethernet, 2 adminComputer, 3 internet, 4 PoE,
+-- 5 porchCamera, 6 WiFi. Relays 7-8 are used only by the DI2 override.
 --
--- Parameters: amplePower runs all five named loads; havePower runs internet
--- and the daylight camera; force-internet and force-wifi request their named
--- loads; deepSleep turns off all policy-controlled relays.
+-- Parameters: amplePower runs the wired loads and cameras; havePower runs
+-- internet and the daylight camera; force-internet and force-wifi request
+-- their named loads; deepSleep turns off all policy-controlled relays. With
+-- normal power, the PoE cameras run around sunrise, local noon, and sunset.
 --
--- DI1 (occupied) powers the five named loads. DI2 powers all eight relays.
+-- DI1 (occupied) powers the six named loads. DI2 powers all eight relays.
 -- Inputs override deepSleep, while relay administrative forces override this
--- policy. poweredEthernet implies ethernet.
+-- policy. PoE and WiFi require ethernet. The independently powered porch
+-- camera does not require PoE.
 --
 -- The system timezone converts the UTC clock to local civil time. NOAA's
 -- fractional-year approximation calculates sunrise and sunset at 45.127778,
@@ -17,8 +19,9 @@
 local ETHERNET_RELAY = 1
 local ADMIN_COMPUTER_RELAY = 2
 local INTERNET_RELAY = 3
-local POWERED_ETHERNET_RELAY = 4
+local POE_RELAY = 4
 local PORCH_CAMERA_RELAY = 5
+local WIFI_RELAY = 6
 local RELAY_COUNT = 8
 
 local HOLD_SECONDS = 300
@@ -145,32 +148,33 @@ for relay = 1, RELAY_COUNT do
     wanted[relay] = false
 end
 
+-- Let's keep the computer and internet up so I can fix this thing.
 wanted[ADMIN_COMPUTER_RELAY] = true
+wanted[INTERNET_RELAY] = true
 
 if ample_power then
     wanted[ETHERNET_RELAY] = true
     wanted[ADMIN_COMPUTER_RELAY] = true
     wanted[INTERNET_RELAY] = true
-    wanted[POWERED_ETHERNET_RELAY] = true
+    wanted[POE_RELAY] = true
     wanted[PORCH_CAMERA_RELAY] = true
 else
     if have_power then
-        wanted[INTERNET_RELAY] = true
         wanted[PORCH_CAMERA_RELAY] = daylight
-    end
 
-    if (ample_power or have_power) and scheduled_network then
-        wanted[INTERNET_RELAY] = true
-        wanted[POWERED_ETHERNET_RELAY] = true
+	if scheduled_network then
+	    wanted[POE_RELAY] = true
+        end
     end
 
     if force_internet then
         wanted[ADMIN_COMPUTER_RELAY] = true
         wanted[INTERNET_RELAY] = true
     end
-    if force_wifi then
-        wanted[POWERED_ETHERNET_RELAY] = true
-    end
+end
+
+if force_wifi then
+    wanted[WIFI_RELAY] = true
 end
 
 if deep_sleep then
@@ -187,11 +191,12 @@ elseif occupied then
     wanted[ETHERNET_RELAY] = true
     wanted[ADMIN_COMPUTER_RELAY] = true
     wanted[INTERNET_RELAY] = true
-    wanted[POWERED_ETHERNET_RELAY] = true
+    wanted[POE_RELAY] = true
     wanted[PORCH_CAMERA_RELAY] = true
+    wanted[WIFI_RELAY] = true
 end
 
-if wanted[POWERED_ETHERNET_RELAY] then
+if wanted[POE_RELAY] or wanted[WIFI_RELAY] or wanted[ADMIN_COMPUTER_RELAY] then
     wanted[ETHERNET_RELAY] = true
 end
 

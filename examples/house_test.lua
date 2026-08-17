@@ -84,7 +84,7 @@ scenario("no flags keeps only admin computer",
     {},
     "on(2,300)")
 
-scenario("ample power runs all named loads",
+scenario("ample power runs wired loads and cameras",
     { flags = { amplePower = true } },
     "on(1,300) on(2,300) on(3,300) on(4,300) on(5,300)")
 
@@ -92,7 +92,7 @@ scenario("have power runs internet",
     { flags = { havePower = true } },
     "on(2,300) on(3,300)")
 
-scenario("have power during daylight adds camera",
+scenario("daylight porch camera does not require PoE",
     {
         flags = { havePower = true },
         clock = { hour = 13 },
@@ -107,35 +107,35 @@ scenario("scheduled interval needs normal power",
     { clock = { hour = 12 } },
     "on(2,300)")
 
-scenario("computed dawn runs scheduled network loads",
+scenario("computed dawn runs PoE cameras",
     {
         flags = { havePower = true },
         clock = { hour = 7, minute = 23 },
     },
     "on(1,300) on(2,300) on(3,300) on(4,300)")
 
-scenario("outside computed dawn omits scheduled loads",
+scenario("outside computed dawn omits PoE cameras",
     {
         flags = { havePower = true },
         clock = { hour = 7, minute = 22 },
     },
     "on(2,300) on(3,300)")
 
-scenario("computed noon runs scheduled network loads",
+scenario("computed noon runs PoE cameras",
     {
         flags = { havePower = true },
         clock = { hour = 12 },
     },
     "on(1,300) on(2,300) on(3,300) on(4,300) on(5,300)")
 
-scenario("computed dusk runs scheduled network loads",
+scenario("computed dusk runs PoE cameras",
     {
         flags = { havePower = true },
         clock = { hour = 16, minute = 20 },
     },
     "on(1,300) on(2,300) on(3,300) on(4,300)")
 
-scenario("outside computed dusk omits scheduled loads",
+scenario("outside computed dusk omits PoE cameras",
     {
         flags = { havePower = true },
         clock = { hour = 16, minute = 22 },
@@ -169,13 +169,17 @@ scenario("force internet runs admin and internet",
     { flags = { ["force-internet"] = true } },
     "on(2,300) on(3,300)")
 
-scenario("force wifi runs powered ethernet",
+scenario("force wifi runs WiFi and its Ethernet dependency",
     { flags = { ["force-wifi"] = true } },
-    "on(1,300) on(2,300) on(4,300)")
+    "on(1,300) on(2,300) on(6,300)")
 
 scenario("force flags combine",
     { flags = { ["force-internet"] = true, ["force-wifi"] = true } },
-    "on(1,300) on(2,300) on(3,300) on(4,300)")
+    "on(1,300) on(2,300) on(3,300) on(6,300)")
+
+scenario("forced WiFi also runs with ample power",
+    { flags = { amplePower = true, ["force-wifi"] = true } },
+    "on(1,300) on(2,300) on(3,300) on(4,300) on(5,300) on(6,300)")
 
 scenario("deep sleep overrides ample power and forces",
     {
@@ -185,17 +189,17 @@ scenario("deep sleep overrides ample power and forces",
             ["force-wifi"] = true,
             deepSleep = true,
         },
-        relays = { true, true, true, true, true },
+        relays = { true, true, true, true, true, true },
     },
-    "off(1) off(2) off(3) off(4) off(5)")
+    "off(1) off(2) off(3) off(4) off(5) off(6)")
 
-scenario("DI1 occupied powers the five named relays",
+scenario("DI1 occupied powers the six named relays",
     { inputs = { [1] = true } },
-    "on(1,300) on(2,300) on(3,300) on(4,300) on(5,300)")
+    "on(1,300) on(2,300) on(3,300) on(4,300) on(5,300) on(6,300)")
 
 scenario("DI1 occupied overrides deep sleep",
     { flags = { deepSleep = true }, inputs = { [1] = true } },
-    "on(1,300) on(2,300) on(3,300) on(4,300) on(5,300)")
+    "on(1,300) on(2,300) on(3,300) on(4,300) on(5,300) on(6,300)")
 
 scenario("DI2 powers every relay",
     { inputs = { [2] = true } },

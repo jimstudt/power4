@@ -20,6 +20,7 @@
 --   allow-generator defaults true; set false to suppress automatic
 --                   generator runs
 --   enableCameras   power the camera PoE switch; defaults false
+--   occupied        power the PoE switch and its access point; defaults false
 -- Numbers (defaults shown; state of charge percentages):
 --   dcdc_start      50  start moving energy into the 24v banks below this
 --   dcdc_stop       70  stop moving energy above this
@@ -113,10 +114,12 @@ else
     relay_on(PI_RELAY, PI_HOLD_SECONDS)
 end
 
--- Camera PoE switch. Disabling the cameras opens the relay immediately rather
--- than waiting for its hold to expire.
+-- Camera PoE switch and access point. When neither cameras nor occupancy needs
+-- them, open the relay immediately rather than waiting for its hold to expire.
 local poe_on = relay_state(POE_RELAY)
-if config_bool("enableCameras", false) then
+local want_poe = config_bool("enableCameras", false)
+    or config_bool("occupied", false)
+if want_poe then
     relay_on(POE_RELAY, HOLD_SECONDS)
 elseif poe_on then
     relay_off(POE_RELAY)

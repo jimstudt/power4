@@ -742,15 +742,17 @@ carrier wait while preserving existing commands and configuration.
 ## Example Policies
 
 `examples/house.lua` is the house load-shedding policy. It coordinates the
-Ethernet, admin-computer, internet, powered-Ethernet, and porch-camera relays
+Ethernet, admin-computer, internet, PoE, porch-camera, and WiFi relays
 from externally maintained power, force, and deep-sleep flags plus two
 physical mode inputs. It uses `local_time()` and the configured system
 timezone to compute daylight, sunrise, noon, and sunset windows for latitude
 45.127778, longitude -87.246944. No seasonal policy flag is needed. The
 sunrise, local-noon, and sunset windows span five minutes before through five
 minutes after each event. Its precedence and overlap behavior are covered by
-`examples/house_test.lua`. DI1 is the occupied switch and powers the five named
-loads; DI2 requests all eight relay channels:
+`examples/house_test.lua`. DI1 is the occupied switch and powers the six named
+loads; DI2 requests all eight relay channels. WiFi otherwise stays off unless
+forced. The porch camera has independent power; relay 4 powers the other PoE
+cameras during the sunrise, local-noon, and sunset capture windows:
 
 ```sh
 lua examples/house_test.lua examples/house.lua
@@ -762,9 +764,10 @@ a DC/DC converter, with hysteresis, deadman holds, manual override flags,
 and tunable thresholds read from policy parameters. Because the converter
 normally charges each 24v bank at about 8A, the policy turns it off when either
 24v bank reports more than the configurable `dcdc_ext_amps` threshold (10A by
-default), indicating that generator or solar charging is available. Relay 4 powers the camera
-PoE switch when the `enableCameras` policy boolean is true. Relay 1 keeps the
-service Raspberry Pi powered unless the `deepSleep` policy boolean is true.
+default), indicating that generator or solar charging is available. Relay 4
+powers the camera PoE switch and its access point when either the
+`enableCameras` or `occupied` policy boolean is true. Relay 1 keeps the service
+Raspberry Pi powered unless the `deepSleep` policy boolean is true.
 `examples/shed_test.lua` runs it against scripted scenarios on a host with a
 stock Lua 5.4 interpreter:
 
