@@ -19,6 +19,7 @@ idf_component_register(
         "main.cpp"
         "network_console.cpp"
         "policy_task.cpp"
+        "policy_state.cpp"
         "policy_storage.cpp"
         "relay_gatt.cpp"
         "relay_manager.cpp"

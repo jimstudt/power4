@@ -6,9 +6,11 @@
 #include <string.h>
 
 #include "battery_bank.hpp"
+#include "checksum.hpp"
 #include "config_flags.hpp"
 #include "input_manager.hpp"
 #include "policy_storage.hpp"
+#include "policy_state.hpp"
 #include "relay_manager.hpp"
 #include "rtc_manager.hpp"
 #include "time_manager.hpp"
@@ -43,6 +45,8 @@ struct LuaRunContext {
 };
 
 TaskHandle_t g_policy_task = nullptr;
+PolicyState g_policy_state;  // Only accessed by the policy task and its Lua calls.
+static_assert(kPolicyStateDigestBytes == kChecksumSha1Bytes);
 
 bool tick_reached(TickType_t deadline)
 {
@@ -354,6 +358,39 @@ int lua_config_bool(lua_State *state)
     return 1;
 }
 
+const char *lua_policy_state_name(lua_State *state)
+{
+    size_t length = 0;
+    const char *name = luaL_checklstring(state, 1, &length);
+    if (!PolicyState::valid_name(name) || strlen(name) != length) {
+        luaL_argerror(state, 1, "state name requires 1-15 letters, digits, underscore or hyphen");
+    }
+    return name;
+}
+
+int lua_policy_state_bool(lua_State *state)
+{
+    const char *name = lua_policy_state_name(state);
+    bool default_value = false;
+    if (!lua_isnoneornil(state, 2)) {
+        luaL_checktype(state, 2, LUA_TBOOLEAN);
+        default_value = lua_toboolean(state, 2);
+    }
+    lua_pushboolean(state, g_policy_state.get(name, default_value));
+    return 1;
+}
+
+int lua_policy_state_set(lua_State *state)
+{
+    const char *name = lua_policy_state_name(state);
+    luaL_checktype(state, 2, LUA_TBOOLEAN);
+    if (!g_policy_state.set(name, lua_toboolean(state, 2))) {
+        return luaL_error(state, "policy state is full (maximum %d names)",
+                          static_cast<int>(kPolicyStateCapacity));
+    }
+    return 0;
+}
+
 int lua_battery_bank_state(lua_State *state)
 {
     const char *name = luaL_checkstring(state, 1);
@@ -463,6 +500,10 @@ void register_policy_lua_functions(lua_State *state)
     lua_setglobal(state, "config_number");
     lua_pushcfunction(state, lua_config_bool);
     lua_setglobal(state, "config_bool");
+    lua_pushcfunction(state, lua_policy_state_bool);
+    lua_setglobal(state, "policy_state_bool");
+    lua_pushcfunction(state, lua_policy_state_set);
+    lua_setglobal(state, "policy_state_set");
     lua_pushcfunction(state, lua_battery_bank_state);
     lua_setglobal(state, "battery_bank_state");
     lua_pushcfunction(state, lua_battery_bank_names);
@@ -524,6 +565,7 @@ void run_policy_cycle(TickType_t deadline)
     size_t active_length = 0;
     esp_err_t err = policy_storage_read_alloc(PolicySlot::Active, &active_source, &active_length);
     if (err != ESP_OK) {
+        g_policy_state.clear();
         ESP_LOGW(kTag,
                  "failed to read active policy: %s internal_free=%u internal_largest=%u",
                  esp_err_to_name(err),
@@ -539,7 +581,18 @@ void run_policy_cycle(TickType_t deadline)
     const size_t length = has_active_policy ? active_length : strlen(kEmptyPolicySource);
     const char *chunk_name = has_active_policy ? "policy_active" : "policy_empty";
 
-    if (!run_lua_policy(source, length, chunk_name, deadline)) {
+    uint8_t digest[kChecksumSha1Bytes] = {};
+    err = checksum_sha1(source, length, digest);
+    if (err != ESP_OK) {
+        g_policy_state.clear();
+        ESP_LOGE(kTag, "cannot identify policy program: %s", esp_err_to_name(err));
+        free(active_source);
+        return;
+    }
+    g_policy_state.begin_cycle(digest);
+    const bool ok = run_lua_policy(source, length, chunk_name, deadline);
+    g_policy_state.finish_cycle(ok);
+    if (!ok) {
         ESP_LOGW(kTag, "policy cycle did not complete successfully");
     }
 

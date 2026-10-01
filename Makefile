@@ -28,6 +28,7 @@ endif
 IDF_TARGET ?= esp32s3
 PORT ?= /dev/tty.usbmodem1101
 BAUD ?= 115200
+LUA ?= lua
 BUILD_DIR ?= build
 PACKAGE_DIR ?= dist/power4-firmware
 PACKAGE_TARBALL ?= $(PACKAGE_DIR).tar.gz
@@ -56,7 +57,7 @@ ifneq ($(strip $(BUILD_DIR)),)
 IDF_ARGS += -B $(BUILD_DIR)
 endif
 
-.PHONY: all build test package firmware-images flash monitor menuconfig clean fullclean erase-flash size reconfigure set-target \
+.PHONY: all build test test-shed package firmware-images flash monitor menuconfig clean fullclean erase-flash size reconfigure set-target \
 	power4ctl power4d host power4ctl-clean power4d-clean host-clean deb check-host-target check-deb-target help
 
 all: build
@@ -64,7 +65,9 @@ all: build
 build:
 	$(IDF_PY) $(IDF_ARGS) -DPOWER4_BOARD= build
 
-test:
+test: test-shed
+	$(CXX) -std=c++17 -Wall -Wextra -Werror -Imain tests/test_policy_state.cpp main/policy_state.cpp -o /tmp/power4-test-policy-state
+	/tmp/power4-test-policy-state
 	$(CXX) -std=c++17 -Wall -Wextra -Werror -Itests/ble_stubs -Imain tests/test_ble_disconnect.cpp main/ble_disconnect.cpp -o /tmp/power4-test-ble-disconnect
 	/tmp/power4-test-ble-disconnect
 	$(CXX) -std=c++17 -Wall -Wextra -Werror -Itests/ble_stubs -Imain tests/test_ble_manager.cpp main/ble_manager.cpp -o /tmp/power4-test-ble-manager
@@ -76,6 +79,9 @@ test:
 	python3 tests/validate_timezone.py
 	$(MAKE) -C power4ctl test
 	$(MAKE) -C power4d test
+
+test-shed:
+	$(LUA) examples/shed_test.lua examples/shed.lua
 
 firmware-images: build
 	@mkdir -p "$(PACKAGE_DIR)/bootloader" "$(PACKAGE_DIR)/partition_table" "$(PACKAGE_DIR)/board_config"
@@ -246,6 +252,7 @@ help:
 		'power4 make targets:' \
 		'  make build        Build firmware with ESP-IDF' \
 		'  make test         Run firmware logic and host-program tests' \
+		'  make test-shed    Run shed Lua policy scenarios' \
 		'  make package      Build and bundle binaries for Raspberry Pi flashing' \
 		'  make firmware-images' \
 		'                    Build complete relay-6ch and poe-8ro flash images' \
@@ -270,6 +277,7 @@ help:
 		'  IDF_TARGET=...    ESP-IDF chip target, default: esp32s3' \
 		'  PORT=...          Serial port, default: /dev/tty.usbmodem1101' \
 		'  BAUD=...          Serial baud rate, default: 115200' \
+		'  LUA=...           Lua interpreter for policy tests, default: lua' \
 		'  BUILD_DIR=...     ESP-IDF build directory, default: build' \
 		'  PACKAGE_DIR=...   Firmware bundle directory, default: dist/power4-firmware' \
 		'  BOARD=...         Required by make flash: relay-6ch or poe-8ro' \

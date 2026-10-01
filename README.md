@@ -418,12 +418,23 @@ local_now = local_time() -- timezone-adjusted system time with valid, utc_offset
 config_is_set("generator_ok") -- true only when defined true
 config_bool("allow-generator", true) -- boolean parameter, or the default (nil if omitted) when unset
 config_number("b24_low_limit", 40) -- numeric parameter, or the default (nil if omitted) when unset
+active = policy_state_bool("charging", false) -- boolean memory from previous successful cycles
+policy_state_set("charging", true) -- update volatile policy memory
 syslog("policy reached generator_ok check") -- emit through ESP logging
 
 ready, volts, amps, soc, min_cell_v, cell_age_s, cell_undervoltage =
     battery_bank_state("house")
 names = battery_bank_names()
 ```
+
+`policy_state_bool()` and `policy_state_set()` provide up to eight named
+booleans in fixed RAM storage, with no flash writes. Names must contain 1–15
+ASCII letters, digits, underscores, or hyphens. The getter defaults to `false`
+when its default is omitted; setters and supplied defaults require booleans.
+Invalid names, invalid types, or exceeding the eight-name limit raise a policy
+error. State survives successful cycles of the same policy source and clears
+on reboot, a change to the active source, or a failed policy read or execution.
+Ordinary Lua variables still disappear at the end of every cycle.
 
 The first four `battery_bank_state()` results are unchanged. `min_cell_v` and
 `cell_age_s` are `nil` until every bank member has valid cell data;
@@ -788,20 +799,45 @@ lua examples/house_test.lua examples/house.lua
 ```
 
 `examples/shed.lua` is a complete site policy managing a 48v bank charged by
-a generator and a pair of paralleled 24v banks fed from the 48v bank through
-a DC/DC converter, with hysteresis, deadman holds, manual override flags,
-and tunable thresholds read from policy parameters. Because the converter
+a generator and a small solar array, and a pair of paralleled 24v banks fed
+from the 48v bank through a DC/DC converter, with hysteresis, deadman holds, manual override flags,
+and tunable thresholds read from policy parameters. Two independent demands
+can run the converter; either is sufficient:
+
+| Demand | Start | Continue until |
+| --- | --- | --- |
+| Normal 24v charging | Average 24v SOC below `dcdc_start` (50%), or a low 24v cell/alarm | Average 24v SOC reaches `dcdc_stop` (70%) and cells have recovered |
+| Surplus 48v solar | 48v SOC above `solar_start` (95%) **and** average 24v SOC below `solar_24v_max` (90%) | 48v SOC reaches `solar_stop` (90%), **or** average 24v SOC exceeds `solar_24v_max` (90%) |
+
+The demands use separate volatile booleans, so one demand running the relay
+does not activate the other's hysteresis. After a reboot, changed policy,
+failed cycle, or expired relay hold, each demand must meet its start condition
+again. Install firmware with the `policy_state_bool()` and `policy_state_set()`
+APIs before uploading this shed policy; it checks for both before operating
+the controlled loads. Ethernet is refreshed first to preserve remote access.
+
+For both demands, automatic transfer stops
+on the next policy cycle when the 48v bank reaches or falls below
+`dcdc_source_min` (20% by default), even while charging hysteresis would keep
+it running or either 24v bank's telemetry is unavailable. A low 48v cell or
+undervoltage alarm also stops transfer. The explicit `force_48v_24v` flag
+overrides these automatic protections. Because the converter
 normally charges each 24v bank at about 8A, the policy turns it off when either
 24v bank reports more than the configurable `dcdc_ext_amps` threshold (10A by
-default), indicating that generator or solar charging is available. Relay 4
-powers the camera PoE switch and its access point when either the
+default), indicating that generator or solar charging is available.
+
+Relay 4 powers regular Ethernet and is unconditionally kept on for state
+updates, including during deep sleep or missing battery telemetry. Its
+one-hour deadman hold is refreshed at the start of every policy run, before
+configuration validation. Relay 5 powers the camera PoE switch and its access point when either the
 `enableCameras` or `occupied` policy boolean is true. Relay 1 keeps the service
 Raspberry Pi powered unless the `deepSleep` policy boolean is true.
-`examples/shed_test.lua` runs it against scripted scenarios on a host with a
-stock Lua 5.4 interpreter:
+`examples/shed_test.lua` runs it against scripted scenarios. `make test-shed`
+runs these tests and is also included in `make test`.
+It uses `lua` by default; to select a stock Lua 5.4 interpreter:
 
 ```sh
-lua5.4 examples/shed_test.lua examples/shed.lua
+make test-shed LUA=lua5.4
 ```
 
 ## Repository Status

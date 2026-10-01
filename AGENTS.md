@@ -108,6 +108,12 @@ system state and configuration. Keep this boundary crisp:
 
 Policy failures must produce conservative, inspectable behavior.
 
+Each policy cycle uses a fresh Lua environment. Hysteresis that needs memory
+beyond relay state should use the bounded `policy_state_bool` / `policy_state_set`
+API. Its booleans are owned by the policy task, kept only in RAM, and cleared
+on reboot, changed policy source, or a failed cycle. Independent demands for
+one relay must keep independent hysteresis state.
+
 ## Console and Configuration
 
 The Raspberry Pi is expected to connect over USB serial. Console commands should
