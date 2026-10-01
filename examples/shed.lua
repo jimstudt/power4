@@ -6,7 +6,7 @@
 --                    state of charge is the average of the two
 --
 -- Relays:
---   1  service raspberry pi (normally on; deepSleep turns it off)
+--   1  service raspberry pi (on only while occupied and not deep sleeping)
 --   2  48v -> 24v DC/DC converter, moves energy into the 24v banks
 --   3  generator run control, charges the 48v bank
 --   4  regular Ethernet (always on for state updates)
@@ -15,13 +15,14 @@
 -- Policy parameters (define policy <name>=<value> [<seconds>s]).
 -- Parameter names are NVS keys, so they are limited to 15 characters.
 -- Boolean flags:
---   deepSleep       turn off the service raspberry pi; defaults false
+--   deepSleep       suppress service raspberry pi power; defaults false
 --   force_48v_24v   hold the DC/DC converter on (overrides source protection)
 --   force_48v_gen   hold the generator on (overrides allow-generator)
 --   allow-generator defaults true; set false to suppress automatic
 --                   generator runs
 --   enableCameras   power the camera PoE switch; defaults false
---   occupied        power the PoE switch and its access point; defaults false
+--   occupied        power the service pi, PoE switch, and access point;
+--                   defaults false
 -- Numbers (defaults shown; state of charge percentages):
 --   dcdc_start      50  start moving energy into the 24v banks below this
 --   dcdc_stop       70  stop moving energy above this
@@ -129,15 +130,15 @@ if ready24a and ready24b then
     soc24 = (soc24a + soc24b) / 2
 end
 
--- Service raspberry pi: normally kept on. Deep sleep opens its relay
--- immediately; otherwise the long deadman hold is refreshed each cycle.
+-- Service raspberry pi: power it only while the site is occupied and not in
+-- deep sleep. Losing either demand opens the relay immediately.
 local pi_on = relay_state(PI_RELAY)
-if config_bool("deepSleep", false) then
-    if pi_on then
-        relay_off(PI_RELAY)
-    end
-else
+local want_pi = config_bool("occupied", false)
+    and not config_bool("deepSleep", false)
+if want_pi then
     relay_on(PI_RELAY, PI_HOLD_SECONDS)
+elseif pi_on then
+    relay_off(PI_RELAY)
 end
 
 -- Camera PoE switch and access point. When neither cameras nor occupancy needs

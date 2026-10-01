@@ -830,8 +830,8 @@ Relay 4 powers regular Ethernet and is unconditionally kept on for state
 updates, including during deep sleep or missing battery telemetry. Its
 one-hour deadman hold is refreshed at the start of every policy run, before
 configuration validation. Relay 5 powers the camera PoE switch and its access point when either the
-`enableCameras` or `occupied` policy boolean is true. Relay 1 keeps the service
-Raspberry Pi powered unless the `deepSleep` policy boolean is true.
+`enableCameras` or `occupied` policy boolean is true. Relay 1 powers the service
+Raspberry Pi only while `occupied` is true and `deepSleep` is false.
 `examples/shed_test.lua` runs it against scripted scenarios. `make test-shed`
 runs these tests and is also included in `make test`.
 It uses `lua` by default; to select a stock Lua 5.4 interpreter:

@@ -101,7 +101,7 @@ local failures = 0
 local function scenario(label, env, expected)
     reset(env)
     dofile(POLICY)
-    if not config_bool("deepSleep", false) then
+    if config_bool("occupied", false) and not config_bool("deepSleep", false) then
         if expected == "" then
             expected = "on(1,3600)"
         else
@@ -354,17 +354,26 @@ scenario("manual dcdc force overrides external charge",
       flags = { force_48v_24v = true } },
     "on(2,300)")
 
-scenario("raspberry pi is held on by default",
+scenario("unoccupied leaves an idle raspberry pi off",
     { banks = full },
     "")
 
-scenario("deepSleep turns off a running raspberry pi",
-    { banks = full, relays = { [1] = true }, flags = { deepSleep = true } },
+scenario("unoccupied turns off a running raspberry pi",
+    { banks = full, relays = { [1] = true } },
     "off(1)")
 
-scenario("deepSleep leaves an idle raspberry pi off",
-    { banks = full, flags = { deepSleep = true } },
-    "")
+scenario("occupied holds the raspberry pi on",
+    { banks = full, flags = { occupied = true } },
+    "on(5,300)")
+
+scenario("deepSleep overrides occupancy for a running raspberry pi",
+    { banks = full, relays = { [1] = true },
+      flags = { occupied = true, deepSleep = true } },
+    "off(1) on(5,300)")
+
+scenario("deepSleep and occupancy leave an idle raspberry pi off",
+    { banks = full, flags = { occupied = true, deepSleep = true } },
+    "on(5,300)")
 
 scenario("enableCameras powers the PoE switch",
     { banks = full, flags = { enableCameras = true } },
