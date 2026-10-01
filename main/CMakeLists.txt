@@ -1,5 +1,6 @@
 idf_component_register(
     SRCS
+        "ble_disconnect.cpp"
         "ble_manager.cpp"
         "board_config.cpp"
         "board_i2c.cpp"

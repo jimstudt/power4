@@ -65,6 +65,10 @@ build:
 	$(IDF_PY) $(IDF_ARGS) -DPOWER4_BOARD= build
 
 test:
+	$(CXX) -std=c++17 -Wall -Wextra -Werror -Itests/ble_stubs -Imain tests/test_ble_disconnect.cpp main/ble_disconnect.cpp -o /tmp/power4-test-ble-disconnect
+	/tmp/power4-test-ble-disconnect
+	$(CXX) -std=c++17 -Wall -Wextra -Werror -Itests/ble_stubs -Imain tests/test_ble_manager.cpp main/ble_manager.cpp -o /tmp/power4-test-ble-manager
+	/tmp/power4-test-ble-manager
 	$(CXX) -std=c++17 -Wall -Wextra -Werror -Imain tests/test_jbd_protocol.cpp main/jbd_protocol.cpp -o /tmp/power4-test-jbd-protocol
 	/tmp/power4-test-jbd-protocol
 	python3 tests/validate_board_profiles.py

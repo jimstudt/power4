@@ -7,6 +7,7 @@
 #include <string.h>
 
 #include "battery_store.hpp"
+#include "ble_disconnect.hpp"
 #include "ble_manager.hpp"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
@@ -126,6 +127,8 @@ BatteryCandidate g_candidates[kSeenDevicesMax] = {};
 size_t g_candidate_count = 0;
 ScanStats g_scan_stats = {};
 ProbeState g_probe = {};
+// Owned by the scanner task. Do not replace g_probe while cleanup is pending.
+bool g_probe_cleanup_pending = false;
 bool g_verbose_battery_scanning = false;
 
 void format_addr(const ble_addr_t &addr, char *buffer, size_t buffer_size)
@@ -744,8 +747,16 @@ int probe_gap_event(ble_gap_event *event, void *arg)
         return 0;
 
     case BLE_GAP_EVENT_DISCONNECT:
-        g_probe.conn_handle = BLE_HS_CONN_HANDLE_NONE;
-        xEventGroupSetBits(g_scanner_events, kProbeDisconnectedBit);
+        if (event->disconnect.conn.conn_handle == g_probe.conn_handle) {
+            g_probe.conn_handle = BLE_HS_CONN_HANDLE_NONE;
+            xEventGroupSetBits(g_scanner_events, kProbeDisconnectedBit);
+        }
+        return 0;
+
+    case BLE_GAP_EVENT_TERM_FAILURE:
+        ESP_LOGW(kTag, "JBD disconnect failed asynchronously: handle=%u status=%d",
+                 static_cast<unsigned>(event->term_failure.conn_handle),
+                 event->term_failure.status);
         return 0;
 
     case BLE_GAP_EVENT_NOTIFY_RX:
@@ -803,42 +814,24 @@ void cancel_pending_probe_connect(const char *addr)
     wait_for_connect_cancel(addr);
 }
 
-void disconnect_probe(const char *addr)
+bool disconnect_probe(const char *addr)
 {
-    if (g_probe.conn_handle == BLE_HS_CONN_HANDLE_NONE) {
-        cancel_pending_probe_connect(addr);
-        if (g_probe.conn_handle != BLE_HS_CONN_HANDLE_NONE) {
-            disconnect_probe(addr);
-        }
-        return;
-    }
-
-    const uint16_t conn_handle = g_probe.conn_handle;
-    const int rc = ble_gap_terminate(conn_handle, BLE_ERR_REM_USER_CONN_TERM);
-    if (rc != 0) {
-        ESP_LOGW(kTag,
-                 "failed to disconnect from battery: addr=%s handle=%u rc=%d(%s)",
-                 addr,
-                 static_cast<unsigned>(conn_handle),
-                 rc,
-                 ble_hs_rc_name(rc));
-        if (rc == BLE_HS_ENOTCONN) {
+    cancel_pending_probe_connect(addr);
+    g_probe_cleanup_pending = ble_gap_conn_active() || !ble_disconnect_peer(g_probe.addr);
+    if (g_probe_cleanup_pending) {
+        ESP_LOGE(kTag, "JBD cleanup failed; requesting Bluetooth reset: addr=%s", addr);
+        const esp_err_t err = ble_manager_reset(kSyncWaitTicks);
+        if (err == ESP_OK) {
+            // The reset's disconnect and sync callbacks have finished before
+            // the manager signals recovery, so it is safe to reuse this probe.
+            g_probe_cleanup_pending = false;
             g_probe.conn_handle = BLE_HS_CONN_HANDLE_NONE;
+        } else {
+            ESP_LOGE(kTag, "Bluetooth recovery incomplete; deferring battery probes: addr=%s err=%s",
+                     addr, esp_err_to_name(err));
         }
-        return;
     }
-
-    const EventBits_t bits = xEventGroupWaitBits(g_scanner_events,
-                                                 kProbeDisconnectedBit,
-                                                 pdTRUE,
-                                                 pdFALSE,
-                                                 kDisconnectTimeoutTicks);
-    if ((bits & kProbeDisconnectedBit) == 0) {
-        ESP_LOGW(kTag,
-                 "timed out waiting for JBD battery disconnect: addr=%s handle=%u",
-                 addr,
-                 static_cast<unsigned>(conn_handle));
-    }
+    return !g_probe_cleanup_pending;
 }
 
 bool discover_probe_handles(void)
@@ -1055,6 +1048,8 @@ void probe_battery(const BatteryCandidate &candidate)
         return;
     }
 
+    g_probe_cleanup_pending = true;
+
     if (!wait_for_probe_bits(kProbeConnectedBit, kConnectProcedureTimeoutTicks)) {
         ESP_LOGW(kTag, "JBD battery connection timed out: addr=%s status=%d", addr, g_probe.status);
         disconnect_probe(addr);
@@ -1218,6 +1213,14 @@ int scan_event(ble_gap_event *event, void *arg)
 
 esp_err_t run_scan(void)
 {
+    if (g_probe_cleanup_pending) {
+        char addr[18] = {};
+        format_addr(g_probe.addr, addr, sizeof(addr));
+        if (!disconnect_probe(addr)) {
+            return ESP_FAIL;
+        }
+    }
+
     ble_gap_disc_params params = {};
     params.itvl = 500;
     params.window = 250;
@@ -1259,6 +1262,9 @@ esp_err_t run_scan(void)
 
     for (size_t i = 0; i < g_candidate_count; ++i) {
         probe_battery(g_candidates[i]);
+        if (g_probe_cleanup_pending) {
+            return ESP_FAIL;
+        }
         vTaskDelay(pdMS_TO_TICKS(250));
     }
 
@@ -1269,12 +1275,14 @@ void battery_scanner_task(void *arg)
 {
     (void)arg;
 
-    while (ble_manager_wait_until_synced(kSyncWaitTicks) != ESP_OK) {
-        ESP_LOGW(kTag, "waiting for BLE host sync before scanning");
-    }
-
     while (true) {
-        (void)run_scan();
+        // A recovery may outlive its initial wait. Never scan or replace probe
+        // state until the host has synchronized again.
+        if (ble_manager_wait_until_synced(kSyncWaitTicks) == ESP_OK) {
+            (void)run_scan();
+        } else {
+            ESP_LOGW(kTag, "waiting for BLE host sync before scanning");
+        }
         vTaskDelay(kScanPeriodTicks);
     }
 }

@@ -489,6 +489,35 @@ service. Each relay has one readable characteristic whose value is a single byte
 `0` means off and `1` means on. Timer and administrative override details remain
 console-only internal state.
 
+Battery connection cleanup makes at most three disconnect attempts, with a
+250 ms delay between attempts and up to five seconds to confirm each accepted
+or already-pending request. Cleanup checks NimBLE's connection table by peer
+address, including links established before the scanner received a connection
+handle. A failed request, timeout, or `already terminating` response never
+counts as a confirmed disconnect. If cleanup remains unsuccessful, the scanner
+logs the battery address and requests a reset of the Bluetooth host and
+controller. A connection attempt that remains active after cancellation also
+triggers this recovery.
+
+ESP-IDF 6.0.1's NimBLE can retain its terminating flag after an asynchronous
+termination failure. Retries cannot clear that flag; a Bluetooth reset or
+controller reboot is required if that state persists. The automatic recovery
+uses NimBLE's reset path to discard all BLE links and reset the controller,
+then restores advertising after synchronization. It waits up to 30 seconds
+for recovery. If synchronization takes longer, battery probes stay paused and
+the scanner checks again after its normal scan-period delay; it does not keep
+queuing resets. Logs record the reset request, actual reset, and successful
+recovery. Other connected BLE clients will need to reconnect. Relay control
+and the rest of the firmware continue running.
+
+`make test` includes host fault-injection tests for rejected disconnects,
+delayed completion, already-pending termination, retry exhaustion, tick
+wraparound, and reset/recovery sequencing. After installing firmware on
+hardware, use `show ble` during the
+idle interval between scans to check that battery connections (`role=master`)
+have disappeared, inspect `show logs` for retry or Bluetooth recovery messages,
+and confirm that battery observations continue to refresh over multiple scans.
+
 Relay binary sensor GATT interface:
 
 ```text
